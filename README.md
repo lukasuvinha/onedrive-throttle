@@ -45,6 +45,8 @@ O Windows tem um mecanismo nativo para isso: `Image File Execution Options\<exe>
 
 ## Uso
 
+> **Coloque a pasta do projeto fora do OneDrive** (ex.: `C:\onedrive-throttle`). Os relatórios são gravados em `reports\` dentro dela; se ela estiver no OneDrive, os próprios relatórios sincronizam e atrapalham a medição. Documentação completa em [`docs/`](docs/).
+
 ```powershell
 # Ver estado atual (não precisa de admin)
 .\Set-OneDriveThrottle.ps1
@@ -70,7 +72,7 @@ Depois de aplicar: **logoff/login ou reboot**. Confira com `-Action Status` — 
 
 ## Diagnóstico antes/depois
 
-`Get-OneDriveDiag.ps1` não altera nada: levanta hardware, pastas sincronizadas, quantidade de itens e mede por alguns minutos disco/RAM/CPU por processo, gerando um `.txt` em `%LOCALAPPDATA%\onedrive-throttle\reports` (fora do OneDrive, já que a Área de Trabalho costuma estar redirecionada pra ele). Rode como o usuário (sem elevar), em horário de uso normal:
+`Get-OneDriveDiag.ps1` não altera nada: levanta hardware, pastas sincronizadas, quantidade de itens e mede por alguns minutos disco/RAM/CPU por processo, gerando um `.txt` na pasta `reports` ao lado dos scripts. Rode como o usuário (sem elevar), em horário de uso normal:
 
 ```powershell
 .\Get-OneDriveDiag.ps1 -Label base          # nada aplicado
@@ -79,6 +81,19 @@ Depois de aplicar: **logoff/login ou reboot**. Confira com `-Action Status` — 
 ```
 
 Compare principalmente: *Disco ocupado*, *Page Reads/s* e a linha do `OneDrive`. Se o teto de RAM fizer o Page Reads/s subir, ele está trocando RAM por disco.
+
+## Monitor contínuo (comparar dias)
+
+Uma medição de 3 minutos depende muito do momento. `Watch-OneDrive.ps1` roda o dia todo em prioridade baixa e grava **uma linha por minuto** em `reports\onedrive-watch-<PC>-<data>.csv`, ao lado dos scripts (separador e decimal do Windows, abre direto no Excel). Não altera nada.
+
+```powershell
+.\Watch-OneDrive.ps1 -Label base            # deixe a janela minimizada; Ctrl+C para parar
+.\Watch-OneDrive.ps1 -Report -FromHour 8 -ToHour 18   # resumo por dia e configuração
+```
+
+Por minuto ele grava: % ocupado do disco da pasta do OneDrive (amostrado a cada 5 s, com a fração do minuto em ≥ 95%), Page Reads/s, RAM livre, RAM/disco/CPU do `OneDrive.Sync.Service`, do `OneDrive`, do Defender e do indexador, e o processo de fora dessa lista que mais fez I/O. Também grava a configuração do IFEO em vigor (`Config`) e se o motor de sync **realmente** está com ela (`AjusteAtivo`, prioridade de I/O e teto de working set lidos do processo) — o IFEO só vale depois que o OneDrive reinicia.
+
+> Usa o % ocupado **por disco**, não o `_Total`: o `_Total` é a média dos discos e esconde um disco em 100% ao lado de um ocioso.
 
 ## Distribuindo em várias máquinas (AD)
 
