@@ -22,11 +22,24 @@ O objetivo do projeto é **medir** de onde vem a carga e **aplicar só o ajuste 
 | Script | O que faz | Altera o sistema? | Precisa de admin? |
 |---|---|---|---|
 | `Get-OneDriveDiag.ps1` | Foto da máquina: hardware, pastas sincronizadas, quantidade de itens e 3 min de medição | Não | Não |
-| `Watch-OneDrive.ps1` | Monitor contínuo: 1 linha por minuto num CSV diário. `-Report` resume os dias | Não | Não |
-| `Get-OneDriveChurn.ps1` | *(em desenvolvimento)* Lista quais arquivos das pastas sincronizadas mudam, por tipo e pasta. Lê só nome, tamanho e data | Não | Não |
+| `Watch-OneDrive.ps1` | Monitor contínuo: 1 linha por minuto num CSV diário. `-Report` resume os dias. `-InstallStartup` / `-RemoveStartup` cria ou apaga o atalho na pasta Inicializar | Não (o atalho é só um arquivo na pasta Inicializar do usuário) | Não |
+| `Get-OneDriveChurn.ps1` | Mostra quais arquivos das pastas sincronizadas mudam, por categoria (temporário, trava do Office, banco...), extensão e pasta. Varredura das últimas N horas e/ou escuta ao vivo (`-WatchMinutes`). Lê só nome, tamanho, data e atributos; nunca abre nem baixa arquivos | Não | Não |
 | `Set-OneDriveThrottle.ps1` | Aplica ou remove os ajustes (`-Action Status / Apply / Remove`) | **Sim** | Sim, para Apply e Remove |
 
 Todos os relatórios vão para a pasta **`reports\`**, ao lado dos scripts.
+
+### O que o monitor mede, e por que mais de um número de disco
+
+Em SSD, "% ocupado" só quer dizer que havia pelo menos uma operação pendente. Um SSD pode marcar 100% e ainda responder em 0,5 ms. Por isso o monitor grava, para o disco da pasta do OneDrive:
+
+- **% ocupado** e a fração do minuto em ≥ 95% (`DiscoPct95`);
+- **IOPS** (`DiscoIops`) e **latência média** (`DiscoLatMs`). Latência subindo para dezenas de ms é saturação de verdade.
+
+Por processo ele grava **MB/s** e também **operações/s** (`*OpsS`). O MB/s não enxerga abrir arquivo, listar pasta e ler atributos, que são boa parte do trabalho do OneDrive, do Defender e do indexador. Nos testes, já houve minuto com disco ocupado e nenhum processo com MB/s relevante.
+
+Para a memória, grava `PageReadsS` (leituras do arquivo de paginação), RAM livre, commit e o **top 5 de memória privada** de todos os processos (`TopMemMB`). Isso mostra se quem empurra a máquina para a paginação é o OneDrive ou outro programa.
+
+O monitor mede o disco **por disco**, nunca pelo `_Total`: o `_Total` é a média dos discos e esconde um disco em 100% ao lado de um ocioso. O `Get-OneDriveDiag.ps1` segue a mesma regra.
 
 > **A pasta do projeto deve ficar fora do OneDrive** (ex.: `C:\onedrive-throttle`). Se ela estiver dentro dele, os próprios relatórios sincronizam e contaminam a medição. Os scripts avisam quando isso acontece.
 

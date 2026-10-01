@@ -157,6 +157,8 @@ Add
 # --- Medicao -----------------------------------------------------------------
 Add "--- Medicao: $Seconds s, amostra a cada $Interval s ---"
 $ncpu    = $cpu.NumberOfLogicalProcessors * @(Get-CimInstance Win32_Processor).Count
+# Disco medido: o da primeira pasta sincronizada (ou o do sistema).
+$odDrive = $(if (@($roots).Count) { @($roots)[0].Substring(0, 2) } else { $env:SystemDrive }).ToUpper()
 $samples = New-Object System.Collections.Generic.List[object]
 $sys     = New-Object System.Collections.Generic.List[object]
 $end     = (Get-Date).AddSeconds($Seconds)
@@ -175,10 +177,14 @@ while ((Get-Date) -lt $end) {
                 CPU  = [double]$_.PercentProcessorTime / $ncpu
             })
         }
-    $disk = Get-CimInstance Win32_PerfFormattedData_PerfDisk_PhysicalDisk -Filter "Name='_Total'"
+    # Por disco, nao o _Total: o _Total e a MEDIA dos discos e esconde um disco em 100% ao lado de um ocioso.
+    $disks = @(Get-CimInstance Win32_PerfFormattedData_PerfDisk_PhysicalDisk -Filter "Name<>'_Total'")
+    $disk  = $disks | Where-Object { ($_.Name -split ' ') -contains $odDrive } | Select-Object -First 1
+    if (-not $disk) { $disk = $disks | Sort-Object PercentIdleTime | Select-Object -First 1 }
     $mem  = Get-CimInstance Win32_PerfFormattedData_PerfOS_Memory
     $sys.Add([pscustomobject]@{
-        Busy      = 100 - [double]$disk.PercentIdleTime
+        Busy      = [math]::Max(0, 100 - [double]$disk.PercentIdleTime)
+        BusyAny   = [math]::Max(0, 100 - [double]($disks | Measure-Object PercentIdleTime -Minimum).Minimum)
         Queue     = [double]$disk.CurrentDiskQueueLength
         PageReads = [double]$mem.PageReadsPersec
         AvailMB   = [double]$mem.AvailableMBytes
@@ -229,9 +235,11 @@ $pr   = $sys | Measure-Object PageReads -Average -Maximum
 $q    = $sys | Measure-Object Queue -Average -Maximum
 $av   = $sys | Measure-Object AvailMB -Average -Minimum
 $pct100 = [math]::Round(100 * @($sys | Where-Object { $_.Busy -ge 95 }).Count / [math]::Max(1, $sys.Count))
+$any100 = [math]::Round(100 * @($sys | Where-Object { $_.BusyAny -ge 95 }).Count / [math]::Max(1, $sys.Count))
 Add '--- Sistema ---'
-Add ("Disco ocupado: media {0:N0}% | max {1:N0}% | amostras >= 95%: {2}%" -f $busy.Average, $busy.Maximum, $pct100)
-Add ("Fila de disco: media {0:N1} | max {1:N0}" -f $q.Average, $q.Maximum)
+Add ("Disco ocupado ({3}): media {0:N0}% | max {1:N0}% | amostras >= 95%: {2}%" -f $busy.Average, $busy.Maximum, $pct100, $odDrive)
+Add ("Qualquer disco >= 95%: {0}% das amostras" -f $any100)
+Add ("Fila de disco ({2}): media {0:N1} | max {1:N0}" -f $q.Average, $q.Maximum, $odDrive)
 Add ("Page Reads/s (leitura do arquivo de paginacao): media {0:N1} | max {1:N0}" -f $pr.Average, $pr.Maximum)
 Add ("RAM disponivel: media {0:N0} MB | minimo {1:N0} MB" -f $av.Average, $av.Minimum)
 

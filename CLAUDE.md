@@ -18,7 +18,15 @@ Metas do dono do projeto:
 - `Watch-OneDrive.ps1` — somente leitura. Monitor continuo: uma linha por minuto em CSV diario
   (`onedrive-watch-<PC>-<data>.csv`), com a config do IFEO e o estado real do processo de sync.
   `-Report` resume por dia/config. Usa contadores brutos (`Win32_PerfRawData_*`) e disco por
-  instancia (o `_Total` e media dos discos).
+  instancia (o `_Total` e media dos discos). Grava tambem IOPS/latencia do disco, operacoes de
+  I/O por processo (`*OpsS`) e top 5 de memoria privada. `-InstallStartup`/`-RemoveStartup`
+  gerenciam o atalho na pasta Inicializar do usuario.
+  Atencao: `AvgDisksecPerTransfer` e `DiskTransfersPersec` brutos sao UInt32 e dao a volta
+  (ver `Get-Delta32`); o formatado de latencia vem como inteiro em segundos (sempre 0).
+- `Get-OneDriveChurn.ps1` — somente leitura. Quais arquivos das pastas sincronizadas mudam
+  (categoria/extensao/pasta), por varredura de data (`-Hours`) e/ou escuta ao vivo com
+  FileSystemWatcher (`-WatchMinutes`). So metadados; o relatorio tem nomes de arquivos e fica
+  em `reports\`.
 
 ## Perfil das maquinas (importante para interpretar as medicoes)
 - Todas usam SSD SATA (nenhum HD mecanico). Disco em 100% aqui significa fila de I/O

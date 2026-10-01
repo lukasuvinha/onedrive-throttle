@@ -89,11 +89,22 @@ Uma medição de 3 minutos depende muito do momento. `Watch-OneDrive.ps1` roda o
 ```powershell
 .\Watch-OneDrive.ps1 -Label base            # deixe a janela minimizada; Ctrl+C para parar
 .\Watch-OneDrive.ps1 -Report -FromHour 8 -ToHour 18   # resumo por dia e configuração
+.\Watch-OneDrive.ps1 -InstallStartup -Label base      # abre sozinho (minimizado) a cada login
+.\Watch-OneDrive.ps1 -RemoveStartup                   # para de abrir no login
 ```
 
 Por minuto ele grava: % ocupado do disco da pasta do OneDrive (amostrado a cada 5 s, com a fração do minuto em ≥ 95%), Page Reads/s, RAM livre, RAM/disco/CPU do `OneDrive.Sync.Service`, do `OneDrive`, do Defender e do indexador, e o processo de fora dessa lista que mais fez I/O. Também grava a configuração do IFEO em vigor (`Config`) e se o motor de sync **realmente** está com ela (`AjusteAtivo`, prioridade de I/O e teto de working set lidos do processo) — o IFEO só vale depois que o OneDrive reinicia.
 
-> Usa o % ocupado **por disco**, não o `_Total`: o `_Total` é a média dos discos e esconde um disco em 100% ao lado de um ocioso.
+> Usa o % ocupado **por disco**, não o `_Total`: o `_Total` é a média dos discos e esconde um disco em 100% ao lado de um ocioso. Em SSD, olhe também a latência (`DiscoLatMs`): 100% ocupado com latência baixa não é gargalo.
+
+## Quais arquivos mudam
+
+`Get-OneDriveChurn.ps1` mostra o que está sendo gravado nas pastas sincronizadas, por categoria (temporários, travas do Office, bancos de dados, logs...), extensão e pasta, e sugere o padrão para `-IgnorePatterns`. Lê só nome, tamanho, data e atributos; não abre nem baixa arquivos.
+
+```powershell
+.\Get-OneDriveChurn.ps1                          # modificados nas últimas 24 h
+.\Get-OneDriveChurn.ps1 -Hours 8 -WatchMinutes 60   # + 1 h escutando cada gravação ao vivo
+```
 
 ## Distribuindo em várias máquinas (AD)
 
