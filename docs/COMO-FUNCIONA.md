@@ -56,9 +56,15 @@ O Windows lê essa chave **quando o processo inicia**, então:
 
 **Efeito:** o OneDrive continua sincronizando, mas Excel, sistema contábil e navegador passam na frente dele na fila de CPU e de disco. **Não reduz** a RAM.
 
-### 2. Teto de RAM (opcional, experimental: `-MaxWorkingSetMB`)
+### 2. Teto de RAM — não usar
 
-Limita a RAM *física* (working set) do OneDrive. Atenção: o que passar do teto **vai para o arquivo de paginação**. Se a memória privada do processo for maior que o teto, o resultado é mais leitura de disco, ou seja, piora. Só usar se a medição mostrar que o Page Reads/s não sobe.
+O parâmetro `-MaxWorkingSetMB` continua no script, mas **saiu do protocolo de teste e não é recomendado**. Ele limita só o *working set* (a parte da memória que está na RAM física naquele momento), e a validação mostrou que isso não ataca o problema:
+
+- **O Windows já faz isso sozinho.** Quando falta RAM, ele tira páginas do motor de sync. Na validação, o working set do `OneDrive.Sync.Service` caiu para ~100 MB, enquanto a memória privada continuou em ~960 MB. O número que o Gerenciador de Tarefas mostra engana.
+- **O custo real é a memória privada.** É a memória que o processo alocou e que ocupa RAM ou arquivo de paginação; o teto não reduz um byte dela. O que passa do teto vai para o arquivo de paginação e volta como **leitura de disco** (Page Reads/s) quando o sync precisa dela. Ou seja, o teto troca RAM por disco, e disco é justamente o que se quer aliviar.
+- **A memória privada do sync cresce com a quantidade de itens sincronizados.** O que a reduz é sincronizar menos itens (ver *Limitações conhecidas*), não um limite no processo.
+
+O monitor grava as duas medidas (`SyncRamMB` = working set, `SyncPrivMB` = privada). Para avaliar a RAM do OneDrive, use a privada.
 
 ### 3. Políticas oficiais do OneDrive (opcionais)
 
@@ -88,5 +94,6 @@ Se o monitor mostrar que o Defender ou o indexador são parte relevante da carga
 ## Limitações conhecidas
 
 - Nenhum ajuste reduz o trabalho de **sincronizar muitos itens**. O consumo de RAM do OneDrive cresce com a quantidade de arquivos e pastas sincronizados. A solução definitiva é estrutural (menos itens sincronizados, Files On-Demand, reorganização ou migração).
+- **A Microsoft recomenda no máximo 300 mil itens sincronizados**, somando todas as bibliotecas da máquina. Acima disso ela avisa que o cliente pode ter problemas de desempenho. Arquivos "somente online" contam, porque o OneDrive acompanha cada item, baixado ou não. O `Get-OneDriveDiag.ps1` mostra o total por pasta sincronizada. Bibliotecas com pastas repetidas por ano/mês passam desse limite com facilidade.
 - Se a máquina compromete muito mais memória do que tem, **mais RAM** pode ser a solução mais barata e eficaz.
 - `PerfOptions` no IFEO funciona desde o Windows Vista, mas não tem documentação oficial detalhada da Microsoft.

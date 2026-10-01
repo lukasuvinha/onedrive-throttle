@@ -12,11 +12,11 @@
     Rode como o USUARIO da maquina (sem "Executar como administrador"), para
     que as bibliotecas sincronizadas dele aparecam.
 
-    Fluxo de teste sugerido:
+    Fluxo de teste sugerido (protocolo completo em docs\PROTOCOLO-DE-TESTE.md):
       1. Sem nada aplicado   -> .\Get-OneDriveDiag.ps1 -Label base
       2. Com prioridade      -> .\Get-OneDriveDiag.ps1 -Label prioridade
-      3. Com teto de RAM     -> .\Get-OneDriveDiag.ps1 -Label teto600
-    Sempre em horario de uso normal, com o OneDrive sincronizando.
+    Rode FORA do horario medido pelo Watch-OneDrive.ps1 (antes das 8h ou depois
+    das 18h): a contagem de itens gera carga de disco e contaminaria o monitor.
 
 .PARAMETER Seconds
     Duracao da medicao (padrao 180).
@@ -29,7 +29,7 @@
     Contar nao baixa arquivos "somente online".
 
 .PARAMETER Label
-    Rotulo que vai no nome do arquivo (ex.: base, prioridade, teto600).
+    Rotulo que vai no nome do arquivo (ex.: base, prioridade).
 #>
 
 [CmdletBinding()]
@@ -152,6 +152,10 @@ foreach ($r in $roots) {
     if ($partial) { break }
 }
 Add ("TOTAL: {0:N0} arquivos, {1:N0} pastas{2}" -f $totalF, $totalD, $(if ($partial) { '  (PARCIAL - estourou o tempo; o real e maior)' } else { '' }))
+# Recomendacao da Microsoft: no maximo 300 mil itens sincronizados (todas as bibliotecas somadas).
+if ($totalF + $totalD -gt 300000) {
+    Add ("(!) {0:N0} itens: ACIMA dos 300 mil recomendados pela Microsoft. A RAM do sync cresce com isso." -f ($totalF + $totalD))
+}
 Add
 
 # --- Medicao -----------------------------------------------------------------

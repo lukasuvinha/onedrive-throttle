@@ -72,15 +72,14 @@ Depois de aplicar: **logoff/login ou reboot**. Confira com `-Action Status` — 
 
 ## Diagnóstico antes/depois
 
-`Get-OneDriveDiag.ps1` não altera nada: levanta hardware, pastas sincronizadas, quantidade de itens e mede por alguns minutos disco/RAM/CPU por processo, gerando um `.txt` na pasta `reports` ao lado dos scripts. Rode como o usuário (sem elevar), em horário de uso normal:
+`Get-OneDriveDiag.ps1` não altera nada: levanta hardware, pastas sincronizadas, quantidade de itens e mede por alguns minutos disco/RAM/CPU por processo, gerando um `.txt` na pasta `reports` ao lado dos scripts. Rode como o usuário (sem elevar) e **fora do horário medido** pelo monitor (antes das 8h ou depois das 18h): a contagem de itens gera carga de disco própria.
 
 ```powershell
 .\Get-OneDriveDiag.ps1 -Label base          # nada aplicado
 .\Get-OneDriveDiag.ps1 -Label prioridade    # depois do -Action Apply
-.\Get-OneDriveDiag.ps1 -Label teto600       # depois do -MaxWorkingSetMB 600
 ```
 
-Compare principalmente: *Disco ocupado*, *Page Reads/s* e a linha do `OneDrive`. Se o teto de RAM fizer o Page Reads/s subir, ele está trocando RAM por disco.
+Compare principalmente: *Disco ocupado*, *Page Reads/s* e a linha do `OneDrive`. Para comparar dias, use o monitor contínuo abaixo. Se o total de itens passar de **300 mil**, está acima do recomendado pela Microsoft (ver [docs/COMO-FUNCIONA.md](docs/COMO-FUNCIONA.md)).
 
 ## Monitor contínuo (comparar dias)
 
@@ -102,8 +101,8 @@ Por minuto ele grava: % ocupado do disco da pasta do OneDrive (amostrado a cada 
 `Get-OneDriveChurn.ps1` mostra o que está sendo gravado nas pastas sincronizadas, por categoria (temporários, travas do Office, bancos de dados, logs...), extensão e pasta, e sugere o padrão para `-IgnorePatterns`. Lê só nome, tamanho, data e atributos; não abre nem baixa arquivos.
 
 ```powershell
-.\Get-OneDriveChurn.ps1                          # modificados nas últimas 24 h
-.\Get-OneDriveChurn.ps1 -Hours 8 -WatchMinutes 60   # + 1 h escutando cada gravação ao vivo
+.\Get-OneDriveChurn.ps1                            # varredura: modificados nas últimas 24 h (fora do expediente)
+.\Get-OneDriveChurn.ps1 -Hours 0 -WatchMinutes 60  # só escuta, 1 h ao vivo (pode no expediente: não varre pastas)
 ```
 
 ## Distribuindo em várias máquinas (AD)
@@ -115,7 +114,7 @@ Por minuto ele grava: % ocupado do disco da pasta do OneDrive (amostrado a cada 
 ## O que isto NÃO faz (e por quê)
 
 - **Não limita núcleos (afinidade).** Não existe chave de registro para isso e forçar 1 núcleo só faz a sincronização demorar mais — o OneDrive fica mais tempo ativo. Com prioridade baixa, ele já só usa CPU que estiver sobrando.
-- **Não impõe teto de RAM por padrão.** Existe `WorkingSetLimitInKB` no IFEO (parâmetro experimental `-MaxWorkingSetMB`), mas é um limite rígido: o que passar do teto vai para o arquivo de paginação, então a RAM economizada pode virar leitura de disco. Só use depois de medir com `Get-OneDriveDiag.ps1`. O que realmente reduz a RAM do OneDrive é **sincronizar menos itens** (menos bibliotecas, Files On-Demand, excluir pastas enormes). A prioridade de página baixa só faz o Windows descartar a memória dele primeiro quando falta RAM.
+- **Não recomenda teto de RAM.** Existe `WorkingSetLimitInKB` no IFEO (parâmetro `-MaxWorkingSetMB`), mas ele só limita o working set, que o Windows já reduz sozinho quando falta RAM. O custo real é a memória privada, que o teto não reduz: o excedente vai para o arquivo de paginação e volta como leitura de disco. Detalhes em [docs/COMO-FUNCIONA.md](docs/COMO-FUNCIONA.md). O que realmente reduz a RAM do OneDrive é **sincronizar menos itens** (menos bibliotecas, excluir pastas enormes; a Microsoft recomenda no máximo 300 mil). A prioridade de página baixa só faz o Windows descartar a memória dele primeiro quando falta RAM.
 - **Não usa `Idle` por padrão.** Em PC sempre ocupado, `Idle` pode deixar a sincronização parada — e arquivo não sincronizado vira conflito de versão.
 
 ## Dica: a causa raiz geralmente é outra

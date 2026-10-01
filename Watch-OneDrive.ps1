@@ -36,7 +36,7 @@
     Segundos entre amostras de disco dentro do intervalo (padrao 5).
 
 .PARAMETER Label
-    Texto livre gravado em cada linha (ex.: base, prioridade, teto600).
+    Texto livre gravado em cada linha (ex.: base, prioridade, ignore-tmp).
     A configuracao do IFEO ja e gravada sozinha na coluna Config.
 
 .PARAMETER DurationMinutes
@@ -291,6 +291,7 @@ function Show-Report {
             PgRd          = Get-Stat (Col $r 'PageReadsS') 'avg'
             PgRdP95       = Get-Stat (Col $r 'PageReadsS') 'p95'
             LivreMB       = Get-Stat (Col $r 'RamLivreMB') 'avg'
+            SyncPrivMB    = Get-Stat (Col $r 'SyncPrivMB') 'avg'
             SyncMB        = Get-Stat (Col $r 'SyncRamMB') 'avg'
             SyncP95       = Get-Stat (Col $r 'SyncRamMB') 'p95'
             OdMB          = Get-Stat (Col $r 'OdRamMB') 'avg'
@@ -346,12 +347,12 @@ function Show-Report {
 
     Write-Host ("`n== Resumo por dia e configuracao (horas {0}-{1}) ==" -f $FromHour, $ToHour) -ForegroundColor Cyan
     Write-Host 'Em100% = % do tempo com disco >= 95% | MinSat = minutos com disco em 100% por metade do minuto ou mais'
-    Write-Host 'RAM em MB (working set) | IO em MB/s | PgRd = Page Reads/s'
+    Write-Host 'RAM em MB: SyncPrivMB = memoria privada (custo real); *MB = working set (o Windows reduz sozinho) | IO em MB/s | PgRd = Page Reads/s'
     # Duas tabelas para caber no console; o CSV do resumo leva todas as colunas.
     Write-Host 'Iops/LatMs = operacoes e latencia media do disco (em SSD, latencia alta = saturado de verdade)'
     Write-Host ($summary | Format-Table Dia, Config, Rotulo, Ativo, Min, 'Disco%', 'Em100%', MinSat, Iops, LatMs, LatP95, PgRd, PgRdP95, LivreMB -AutoSize |
         Out-String -Width 400).TrimEnd()
-    Write-Host ($summary | Format-Table Dia, Config, Rotulo, SyncMB, SyncP95, OdMB, TotOdMB, TetoWS, SyncIO, OdIO, DefIO, IdxIO -AutoSize |
+    Write-Host ($summary | Format-Table Dia, Config, Rotulo, SyncPrivMB, SyncMB, SyncP95, OdMB, TotOdMB, TetoWS, SyncIO, OdIO, DefIO, IdxIO -AutoSize |
         Out-String -Width 400).TrimEnd()
 
     Write-Host "`n== Nos minutos saturados: quem fazia I/O ==" -ForegroundColor Cyan
