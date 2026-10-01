@@ -1,0 +1,106 @@
+# onedrive-throttle
+
+Deixa o OneDrive "educado" no Windows 10/11: menos disputa de CPU e disco, menos espaço ocupado e menos banda — **sem nenhum script rodando em segundo plano**.
+
+Aplica uma vez, como administrador, e o próprio Windows reaplica a cada boot, login, atualização ou crash do OneDrive.
+
+## Por que registro em vez de script no startup
+
+A abordagem comum é um `.bat` no startup que espera 30 s e muda a prioridade do `OneDrive.exe`. Funciona, mas:
+
+- só pega o processo que existia naquele momento — se o OneDrive reiniciar (update, crash, troca de conta), volta ao normal;
+- depende de acertar o tempo de espera;
+- não mexe na prioridade de **I/O**, que é o que mais trava PC com HD mecânico.
+
+O Windows tem um mecanismo nativo para isso: `Image File Execution Options\<exe>\PerfOptions`. O kernel lê essas chaves **quando o processo é criado** e já o inicia com a prioridade de CPU e de I/O definidas.
+
+| | Script no startup | IFEO PerfOptions |
+|---|---|---|
+| Sobrevive a reboot | Sim (se rodar de novo) | Sim |
+| Sobrevive a restart/update do OneDrive | Não | Sim |
+| Prioridade de I/O (disco) | Não | Sim |
+| Processo extra rodando | Sim | Não |
+| Precisa de admin | Não | Uma vez, para gravar |
+
+> PerfOptions não tem documentação oficial detalhada da Microsoft, mas funciona desde o Vista e é usado há anos. Por design, a prioridade de I/O via IFEO só vai até "Normal" (não dá para aumentar, só reduzir).
+
+## O que o script faz
+
+**Sempre** (camada de prioridade), para `OneDrive.exe`, `OneDrive.Sync.Service.exe` (motor de sync das versões 2025+), `FileCoAuth.exe`, `Microsoft.SharePoint.exe` e `OneDriveStandaloneUpdater.exe`:
+
+- CPU: `BelowNormal` (padrão) ou `Idle`
+- I/O: `Low` (padrão) ou `VeryLow`
+- Memória (opcional, experimental): prioridade de página baixa
+
+**Opcional** (políticas oficiais do OneDrive, as mesmas do ADMX/GPO):
+
+| Parâmetro | Política | Ganho |
+|---|---|---|
+| `-FilesOnDemand` | `FilesOnDemandEnabled` | Disco: arquivos só baixam quando abertos |
+| `-DehydrateTeamSites` | `DehydrateSyncedTeamSites` | Disco: bibliotecas SharePoint/Teams viram "somente online" |
+| `-DehydrateAfterDays 30` | Storage Sense | Disco: libera arquivos não abertos há N dias |
+| `-AutoUploadBandwidth` | `EnableAutomaticUploadBandwidthManagement` | Rede: só envia com banda ociosa |
+| `-UploadPercent 50` | `AutomaticUploadBandwidthPercentage` | Rede: teto de % do upload |
+| `-IgnorePatterns '*.pst','*.ldb'` | `EnableODIgnoreListFromGPO` | CPU/disco/rede: não sincroniza arquivos que mudam o tempo todo |
+
+## Uso
+
+```powershell
+# Ver estado atual (não precisa de admin)
+.\Set-OneDriveThrottle.ps1
+
+# Só prioridade (recomendado para começar)
+.\Set-OneDriveThrottle.ps1 -Action Apply
+
+# Pacote completo
+.\Set-OneDriveThrottle.ps1 -Action Apply -FilesOnDemand -AutoUploadBandwidth `
+    -IgnorePatterns '*.pst','*.ost','*.ldb','*.laccdb' -DehydrateAfterDays 30
+
+# Desfazer tudo
+.\Set-OneDriveThrottle.ps1 -Action Remove
+```
+
+Se a política de execução bloquear:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\Set-OneDriveThrottle.ps1 -Action Apply
+```
+
+Depois de aplicar: **logoff/login ou reboot**. Confira com `-Action Status` — a coluna `PriorityClass` deve mostrar `BelowNormal`. Para ver a prioridade de I/O, use o [Process Explorer](https://learn.microsoft.com/sysinternals/downloads/process-explorer) (coluna *I/O Priority*).
+
+## Diagnóstico antes/depois
+
+`Get-OneDriveDiag.ps1` não altera nada: levanta hardware, pastas sincronizadas, quantidade de itens e mede por alguns minutos disco/RAM/CPU por processo, gerando um `.txt` em `%LOCALAPPDATA%\onedrive-throttle\reports` (fora do OneDrive, já que a Área de Trabalho costuma estar redirecionada pra ele). Rode como o usuário (sem elevar), em horário de uso normal:
+
+```powershell
+.\Get-OneDriveDiag.ps1 -Label base          # nada aplicado
+.\Get-OneDriveDiag.ps1 -Label prioridade    # depois do -Action Apply
+.\Get-OneDriveDiag.ps1 -Label teto600       # depois do -MaxWorkingSetMB 600
+```
+
+Compare principalmente: *Disco ocupado*, *Page Reads/s* e a linha do `OneDrive`. Se o teto de RAM fizer o Page Reads/s subir, ele está trocando RAM por disco.
+
+## Distribuindo em várias máquinas (AD)
+
+- **GPO de inicialização do computador**: Computer Configuration → Policies → Windows Settings → Scripts → Startup → PowerShell Scripts, com os parâmetros desejados. Roda como SYSTEM, então tem admin.
+- **GPO nativo do OneDrive**: as políticas da tabela acima também existem no ADMX que vem com o OneDrive (`%localappdata%\Microsoft\OneDrive\<versão>\adm\`). Se preferir, use o ADMX para as políticas e o script só para a prioridade.
+- **GPP Registry**: dá para replicar as chaves IFEO via Group Policy Preferences, sem script nenhum.
+
+## O que isto NÃO faz (e por quê)
+
+- **Não limita núcleos (afinidade).** Não existe chave de registro para isso e forçar 1 núcleo só faz a sincronização demorar mais — o OneDrive fica mais tempo ativo. Com prioridade baixa, ele já só usa CPU que estiver sobrando.
+- **Não impõe teto de RAM por padrão.** Existe `WorkingSetLimitInKB` no IFEO (parâmetro experimental `-MaxWorkingSetMB`), mas é um limite rígido: o que passar do teto vai para o arquivo de paginação, então a RAM economizada pode virar leitura de disco. Só use depois de medir com `Get-OneDriveDiag.ps1`. O que realmente reduz a RAM do OneDrive é **sincronizar menos itens** (menos bibliotecas, Files On-Demand, excluir pastas enormes). A prioridade de página baixa só faz o Windows descartar a memória dele primeiro quando falta RAM.
+- **Não usa `Idle` por padrão.** Em PC sempre ocupado, `Idle` pode deixar a sincronização parada — e arquivo não sincronizado vira conflito de versão.
+
+## Dica: a causa raiz geralmente é outra
+
+Se o OneDrive trava a máquina, quase sempre é um destes:
+
+1. **HD mecânico** — a prioridade de I/O ajuda muito, mas um SSD resolve.
+2. **Arquivos que mudam o tempo todo** dentro da pasta sincronizada (bancos de dados, `.pst`, arquivos de lock). O OneDrive recalcula e reenvia a cada alteração. Use `-IgnorePatterns` ou tire da pasta.
+3. **Muitos itens sincronizados** (centenas de milhares). O consumo de RAM e CPU cresce com a quantidade de itens.
+4. **Pastas conhecidas (Área de Trabalho/Documentos) com lixo acumulado** sincronizando.
+
+## Licença
+
+MIT
