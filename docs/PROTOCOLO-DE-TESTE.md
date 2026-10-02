@@ -39,9 +39,9 @@ O monitor descobre sozinho qual ajuste está aplicado (coluna `Config`), então 
 
 | Etapa | O que fazer (como admin) | Depois | Pergunta que responde |
 |---|---|---|---|
-| **0. Baseline** | `.\Set-OneDriveThrottle.ps1 -Action Remove` | logoff/login | Quanto tempo o disco fica em 100%? Quem causa: OneDrive, Defender ou indexador? |
-| **1. Prioridade** | `.\Set-OneDriveThrottle.ps1 -Action Apply` | logoff/login | A prioridade baixa reduz o disco em 100% e a lentidão percebida? |
-| **2. Ajuste dirigido** | Depende do resultado da etapa 0 (ex.: `-IgnorePatterns` para arquivos que mudam sem parar, indexador, Defender) | logoff/login | O culpado principal foi eliminado? |
+| **0. Baseline** | `.\Set-OneDriveThrottle.ps1 -Action Remove` | logoff/login | Qual a latência do disco e quantos minutos são lentos? Quem causa: OneDrive, antivírus (ESET) ou indexador? |
+| **1. Prioridade** | `.\Set-OneDriveThrottle.ps1 -Action Apply` | logoff/login | A prioridade baixa reduz a latência e a lentidão percebida? |
+| **2. Ajuste dirigido** | Depende do resultado da etapa 0 (ex.: `-IgnorePatterns` para arquivos que mudam sem parar, indexador, exclusão no antivírus) | logoff/login | O culpado principal foi eliminado? |
 | **Contraprova** *(opcional)* | `-Action Remove` por 1 dia | logoff/login | A melhora foi do ajuste ou de uma semana mais leve? |
 
 Depois de cada logoff/login, confira no console do monitor ou no CSV: `AjusteAtivo = sim`. Se aparecer `nao`, o OneDrive não reiniciou com o ajuste novo.
@@ -71,29 +71,40 @@ Os arquivos de máquinas diferentes não se misturam: o nome do PC faz parte do 
 
 ## Como ler o resumo
 
+O resumo separa cada dia e configuração em três **fases** (coluna `Fase`):
+
+- **`inicio`**: primeiros 60 min após cada início do OneDrive (login, reboot, restart). É a sincronização inicial, sempre mais pesada.
+- **`resto`**: o resto do dia, que reflete o trabalho do usuário. **Compare as etapas por esta linha.**
+- **`sem sync`**: minutos com o motor de sync parado. Mostra quanta carga sobra sem o OneDrive.
+
+**A métrica principal é a latência do disco** (`LatMs` e `LatP95`). Em SSD, "% ocupado" marca 100% mesmo com o disco respondendo rápido, então `Ocup%` e `Em100%` ficam só como referência.
+
 | Coluna | Significado | O que é bom |
 |---|---|---|
-| `Em100%` | % do tempo em que o disco ficou ≥ 95% ocupado | Cair de uma etapa para a outra |
-| `MinSat` | Minutos em que o disco passou metade do minuto ou mais em 100% | Cair |
-| `Disco%` | Ocupação média do disco | Cair |
-| `Iops` / `LatMs` / `LatP95` | Operações por segundo e latência do disco (média / pico). Em SSD, % ocupado alto com latência baixa (< ~5 ms) não é gargalo; latência de dezenas de ms é | Latência cair |
-| `PgRd` / `PgRdP95` | Leituras do arquivo de paginação por segundo (média / pico) | **Não subir.** Se subir, falta RAM |
+| `LatMs` / `LatP95` | **Latência do disco** (média / p95, em ms). SSD SATA saudável: < ~5 ms. Dezenas de ms = saturado | **Cair** de uma etapa para a outra |
+| `MinLentos` | Minutos com latência média ≥ 20 ms (ajustável com `-SlowLatMs`) | Cair |
+| `Iops` | Operações de disco por segundo | Referência (quanto trabalho havia) |
+| `Ocup%` / `Em100%` | % ocupado médio / % do tempo em ≥ 95% | Só referência em SSD |
+| `PagUso%` / `PagUsoMB` | Uso do arquivo de paginação (média / máximo) | Baixo. Subindo com `LivreMB` baixo = **falta de RAM** |
 | `LivreMB` | RAM livre média | Subir |
+| `PgRd` | Page Reads/s: leituras de disco por falta de página. **Inclui arquivos fora do cache**, não é só paginação | Referência. Sozinho não indica falta de RAM |
 | `SyncPrivMB` | Memória privada do motor de sync: o custo real de RAM dele | Referência. Cresce com a quantidade de itens sincronizados |
 | `SyncMB`, `OdMB`, `TotOdMB` | Working set (RAM física no momento) do sync, do OneDrive.exe e do total do OneDrive | Só referência: o Windows reduz esse número sozinho quando falta RAM |
-| `SyncIO`, `OdIO`, `DefIO`, `IdxIO` | MB/s de disco do sync, OneDrive, Defender e indexador | Mostra **quem** usa o disco |
+| `SyncOps`, `OdOps`, `AvOps`, `IdxOps` | Operações de I/O por segundo do sync, OneDrive, antivírus (ESET + Defender) e indexador | Mostra **quem** usa o disco |
+| `SyncIO`, `OdIO`, `AvIO`, `IdxIO` | O mesmo em MB/s | Idem (não vê listar pastas e ler atributos) |
 | `Ativo` | Se o ajuste estava realmente em vigor no processo | `sim` nas etapas 1 e 2 |
 
-A segunda tabela, **"Nos minutos saturados: quem fazia I/O"**, é a mais importante da etapa 0: mostra quem estava usando o disco exatamente quando ele travou, incluindo processos fora da lista (`TopFora` por MB/s, `TopOps` por operações). Olhe as colunas `*Ops` além das `*IO`: varrer pastas e ler atributos quase não aparece em MB/s. Se nenhum processo tiver I/O relevante e o `PgRd` estiver alto, quem está usando o disco é a **paginação** (falta de RAM).
+A tabela **"Nos minutos lentos: quem fazia I/O"** é a mais importante da etapa 0. Ela mostra quem estava usando o disco exatamente quando a latência subiu, incluindo processos fora da lista (`TopFora` por MB/s, `TopOps` por operações). Olhe as colunas `*Ops` além das `*IO`: varrer pastas e ler atributos quase não aparece em MB/s.
 
-A terceira tabela, **"Memória: top processos"**, mostra quem mais ocupa memória privada no dia. Se a máquina pagina muito, é ela que diz quem consome a RAM. Pode ser o OneDrive ou outro programa.
+A tabela **"Memória: top processos"** mostra quem mais ocupa memória privada no dia. Se o arquivo de paginação estiver enchendo, é ela que diz quem consome a RAM. Pode ser o OneDrive ou outro programa.
 
 ## Regras de decisão
 
-- **Disco em 100% caiu claramente na etapa 1** → manter a prioridade e aplicar nas outras máquinas.
-- **Nos minutos saturados, Defender ou indexador aparecem com I/O comparável ao OneDrive** → a etapa 2 ataca esses dois.
+- **Na fase `resto`, `LatMs`/`LatP95` e `MinLentos` caíram claramente na etapa 1** → manter a prioridade e aplicar nas outras máquinas.
+- **Só a fase `inicio` é lenta** → o problema é a sincronização inicial (reinícios do OneDrive, quantidade de itens), não o trabalho do dia.
+- **Nos minutos lentos, o antivírus ou o indexador aparecem com operações comparáveis às do OneDrive** → a etapa 2 ataca esses dois. Também vale se a fase `sem sync` já tiver minutos lentos.
 - **O Churn mostra arquivos temporários ou de trava mudando sem parar** → `-IgnorePatterns` para esses nomes.
-- **`PgRd` alto e `LivreMB` baixo o dia todo** → o gargalo é memória: veja a tabela de memória para saber quem consome e avalie upgrade de RAM ou reduzir os itens sincronizados.
+- **`PagUso%` subindo e `LivreMB` baixo o dia todo** → o gargalo é memória: veja a tabela de memória para saber quem consome e avalie upgrade de RAM ou reduzir os itens sincronizados. `PgRd` alto com RAM livre sobrando **não** é falta de RAM, são leituras de arquivo.
 - **O diagnóstico mostra mais de 300 mil itens sincronizados** → acima do recomendado pela Microsoft. Nenhum ajuste de prioridade resolve a RAM do sync; entra na discussão estrutural (ver [COMO-FUNCIONA.md](COMO-FUNCIONA.md#limitações-conhecidas)).
 
 ## Aplicar nas outras máquinas

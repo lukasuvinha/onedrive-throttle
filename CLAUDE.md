@@ -19,7 +19,8 @@ Metas do dono do projeto:
   (`onedrive-watch-<PC>-<data>.csv`), com a config do IFEO e o estado real do processo de sync.
   `-Report` resume por dia/config. Usa contadores brutos (`Win32_PerfRawData_*`) e disco por
   instancia (o `_Total` e media dos discos). Grava tambem IOPS/latencia do disco, operacoes de
-  I/O por processo (`*OpsS`) e top 5 de memoria privada. `-InstallStartup`/`-RemoveStartup`
+  I/O por processo (`*OpsS`), top 5 de memoria privada, uso do arquivo de paginacao
+  (`PaginacaoUsoPct/MB`) e inicio do motor de sync (`SyncInicio`). `-InstallStartup`/`-RemoveStartup`
   gerenciam o atalho na pasta Inicializar do usuario.
   Atencao: `AvgDisksecPerTransfer` e `DiskTransfersPersec` brutos sao UInt32 e dao a volta
   (ver `Get-Delta32`); o formatado de latencia vem como inteiro em segundos (sempre 0).
@@ -45,8 +46,17 @@ Metas do dono do projeto:
    fora do protocolo.** O Windows ja reduz sozinho o working set do sync (validacao: ~100 MB de
    WS com ~960 MB de privada); o custo real e a memoria privada, que o teto nao reduz.
    Ver docs/COMO-FUNCIONA.md. Nao propor o teto de novo sem dado novo.
-3. O disco em 100% é só do OneDrive ou também do Defender (`MsMpEng`) e do indexador
+3. A latencia alta do disco e so do OneDrive ou tambem do antivirus (ESET `ekrn`/`egui`, o da
+   empresa; Defender `MsMpEng` se ativo; grupo `Antivirus*` no Watch) e do indexador
    (`SearchIndexer`) reagindo aos arquivos que o OneDrive mexe?
+
+Notas de medicao (validadas em 2026-10-02):
+- Metrica principal de disco = latencia (`DiscoLatMs`, media e p95). Em SSD o % ocupado fica
+  em 100% com latencia baixa; nao usar % ocupado para concluir nada.
+- `PageReadsS` NAO e so arquivo de paginacao: inclui leitura de arquivos fora do cache e
+  mapeados. Falta de RAM = `PaginacaoUsoPct/MB` subindo + `RamLivreMB` baixa.
+- O -Report separa a fase `inicio` (60 min apos cada `SyncInicio`), `resto` e `sem sync`.
+  Comparar etapas pela fase `resto`.
 4. ~~`WorkingSetLimitInKB` via IFEO é respeitado?~~ Sem prioridade (teto fora do protocolo).
 5. Quantos itens cada maquina sincroniza? A Microsoft recomenda no maximo 300 mil; acima disso
    a RAM do sync e problema estrutural, nao de ajuste.

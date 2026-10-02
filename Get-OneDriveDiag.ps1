@@ -40,8 +40,17 @@ param(
     [string]$Label = 'diag',
 
     # Padrao: subpasta reports ao lado do script.
-    [string]$OutDir = (Join-Path $PSScriptRoot 'reports')
+    [string]$OutDir = ''
 )
+
+# Pasta de relatorios padrao: reports\ ao lado do script. Resolvido aqui, e nao no
+# valor padrao do parametro, porque no Windows PowerShell 5.1 o $PSScriptRoot fica
+# vazio dentro do param() quando o script e chamado com "powershell.exe -File"
+# (como faz o atalho de inicializacao).
+if (-not $OutDir) {
+    $scriptDir = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent $MyInvocation.MyCommand.Definition }
+    $OutDir = Join-Path $scriptDir 'reports'
+}
 
 # Relatorios ficam numa pasta "reports" ao lado do script, facil de achar e copiar.
 # A pasta do projeto NAO deve ficar dentro do OneDrive: os arquivos gerados seriam
@@ -186,7 +195,11 @@ while ((Get-Date) -lt $end) {
     $disk  = $disks | Where-Object { ($_.Name -split ' ') -contains $odDrive } | Select-Object -First 1
     if (-not $disk) { $disk = $disks | Sort-Object PercentIdleTime | Select-Object -First 1 }
     $mem  = Get-CimInstance Win32_PerfFormattedData_PerfOS_Memory
+    # Uso do arquivo de paginacao: bruto PercentUsage = paginas de 4 KB em uso, _Base = tamanho em paginas.
+    $pf   = Get-CimInstance Win32_PerfRawData_PerfOS_PagingFile -Filter "Name='_Total'" -ErrorAction SilentlyContinue
     $sys.Add([pscustomobject]@{
+        PagePct   = if ($pf -and [double]$pf.PercentUsage_Base) { 100 * [double]$pf.PercentUsage / [double]$pf.PercentUsage_Base } else { $null }
+        PageMB    = if ($pf) { [double]$pf.PercentUsage * 4KB / 1MB } else { $null }
         Busy      = [math]::Max(0, 100 - [double]$disk.PercentIdleTime)
         BusyAny   = [math]::Max(0, 100 - [double]($disks | Measure-Object PercentIdleTime -Minimum).Minimum)
         Queue     = [double]$disk.CurrentDiskQueueLength
@@ -220,7 +233,9 @@ $perProc = $samples | Group-Object N, Name | ForEach-Object {
     }
 }
 
-$watch = 'OneDrive', 'OneDrive.Sync.Service', 'FileCoAuth', 'Microsoft.SharePoint', 'MsMpEng', 'SearchIndexer', 'SearchProtocolHost', 'System'
+$watch = 'OneDrive', 'OneDrive.Sync.Service', 'FileCoAuth', 'Microsoft.SharePoint',
+         'ekrn', 'egui', 'MsMpEng', 'MpDefenderCoreService',      # antivirus: ESET e Defender
+         'SearchIndexer', 'SearchProtocolHost', 'System'
 Add 'Processos de interesse (OneDrive, antivirus, indexador):'
 Add (($perProc | Where-Object { $watch -contains $_.Processo } | Sort-Object 'Disco MB/s' -Descending |
       Format-Table -AutoSize | Out-String).TrimEnd())
@@ -244,8 +259,16 @@ Add '--- Sistema ---'
 Add ("Disco ocupado ({3}): media {0:N0}% | max {1:N0}% | amostras >= 95%: {2}%" -f $busy.Average, $busy.Maximum, $pct100, $odDrive)
 Add ("Qualquer disco >= 95%: {0}% das amostras" -f $any100)
 Add ("Fila de disco ({2}): media {0:N1} | max {1:N0}" -f $q.Average, $q.Maximum, $odDrive)
-Add ("Page Reads/s (leitura do arquivo de paginacao): media {0:N1} | max {1:N0}" -f $pr.Average, $pr.Maximum)
+# Page Reads/s conta toda leitura de disco por falta de pagina: arquivo de paginacao E arquivos
+# fora do cache/mapeados. Sozinho nao indica falta de RAM; para isso, uso do arquivo de paginacao + RAM livre.
+Add ("Page Reads/s (leituras por falta de pagina, inclui arquivos fora do cache): media {0:N1} | max {1:N0}" -f $pr.Average, $pr.Maximum)
+$pp = $sys | Where-Object { $null -ne $_.PagePct } | Measure-Object PagePct -Average -Maximum
+$pm = $sys | Where-Object { $null -ne $_.PageMB }  | Measure-Object PageMB -Maximum
+if ($pp.Count) {
+    Add ("Arquivo de paginacao em uso: media {0:N1}% | max {1:N1}% ({2:N0} MB)" -f $pp.Average, $pp.Maximum, $pm.Maximum)
+}
 Add ("RAM disponivel: media {0:N0} MB | minimo {1:N0} MB" -f $av.Average, $av.Minimum)
+Add 'Falta de RAM = arquivo de paginacao enchendo + RAM disponivel baixa (nao so Page Reads/s alto).'
 
 $out | Set-Content -Path $file -Encoding UTF8
 Write-Host "`nRelatorio salvo em: $file" -ForegroundColor Green

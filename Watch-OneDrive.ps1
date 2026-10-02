@@ -7,14 +7,21 @@
     Nao altera nada no sistema (so le contadores e registro).
 
     O que e medido em cada intervalo (padrao 60 s):
-      - Disco: % ocupado do disco onde fica a pasta do OneDrive, amostrado a
-        cada DiskInterval s (padrao 5). Grava media, maximo e a % do minuto em
-        que o disco ficou >= 95% ("disco em 100%").
+      - Disco onde fica a pasta do OneDrive, amostrado a cada DiskInterval s
+        (padrao 5): LATENCIA media (metrica principal: em SSD e ela que mostra
+        saturacao), IOPS, % ocupado e a % do minuto em que ficou >= 95%.
+        Em SSD, % ocupado 100% so quer dizer "sempre havia 1 operacao pendente".
       - Por grupo de processo (OneDrive.Sync.Service, OneDrive, outros do
-        OneDrive, Defender, indexador): RAM (working set e privada), disco
-        (IO MB/s), CPU %.
-      - Sistema: Page Reads/s (leitura do arquivo de paginacao), RAM livre, commit.
+        OneDrive, antivirus [ESET e Defender], indexador): RAM (working set e
+        privada), disco (IO MB/s e operacoes/s), CPU %.
+      - Sistema: Page Reads/s, RAM livre, commit e uso do arquivo de paginacao.
+        Page Reads/s NAO e so arquivo de paginacao: conta toda leitura de disco
+        feita por falta de pagina, inclusive arquivos que nao estavam no cache
+        do Windows e arquivos mapeados em memoria. Para falta de RAM, use o uso
+        do arquivo de paginacao (PaginacaoUsoPct/MB) junto com a RAM livre.
       - O processo de fora dessa lista que mais fez I/O no intervalo.
+      - Inicio do motor de sync (SyncInicio): o -Report separa os primeiros
+        60 min apos cada inicio do OneDrive (sincronizacao inicial) do resto.
       - Configuracao em vigor: o que esta no IFEO (Config) e se o processo
         de sync realmente esta com a prioridade/teto (AjusteAtivo, SyncPrioIo,
         SyncWsTetoMB) - o IFEO so vale depois que o OneDrive reinicia.
@@ -47,6 +54,14 @@
 
 .PARAMETER FromHour / ToHour
     Com -Report: considera so linhas entre essas horas (ex.: 8 e 18 = expediente).
+
+.PARAMETER SlowLatMs
+    Com -Report: latencia media (ms) a partir da qual o minuto conta como
+    "lento" (padrao 20). SSD SATA saudavel fica abaixo de ~5 ms.
+
+.PARAMETER StartMinutes
+    Com -Report: quantos minutos apos cada inicio do OneDrive contam como
+    fase "inicio" (padrao 60).
 
 .EXAMPLE
     .\Watch-OneDrive.ps1 -Label base
@@ -81,9 +96,24 @@ param(
     [ValidateRange(1, 24)]
     [int]$ToHour = 24,
 
+    [ValidateRange(1, 1000)]
+    [double]$SlowLatMs = 20,
+
+    [ValidateRange(5, 600)]
+    [int]$StartMinutes = 60,
+
     # Padrao: subpasta reports ao lado do script.
-    [string]$OutDir = (Join-Path $PSScriptRoot 'reports')
+    [string]$OutDir = ''
 )
+
+# Pasta de relatorios padrao: reports\ ao lado do script. Resolvido aqui, e nao no
+# valor padrao do parametro, porque no Windows PowerShell 5.1 o $PSScriptRoot fica
+# vazio dentro do param() quando o script e chamado com "powershell.exe -File"
+# (como faz o atalho de inicializacao).
+if (-not $OutDir) {
+    $scriptDir = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent $MyInvocation.MyCommand.Definition }
+    $OutDir = Join-Path $scriptDir 'reports'
+}
 
 # Relatorios ficam numa pasta "reports" ao lado do script, facil de achar e copiar.
 # A pasta do projeto NAO deve ficar dentro do OneDrive: os arquivos gerados seriam
@@ -106,7 +136,8 @@ $Groups = [ordered]@{
     Sync     = @('OneDrive.Sync.Service')
     Od       = @('OneDrive')
     OdOutros = @('FileCoAuth', 'Microsoft.SharePoint', 'OneDriveStandaloneUpdater', 'OneDriveSetup')
-    Defender = @('MsMpEng', 'MpDefenderCoreService', 'NisSrv')
+    # Antivirus: ESET (o da empresa) e Defender (pode estar ativo em paralelo ou em outras maquinas).
+    Antivirus = @('ekrn', 'egui', 'MsMpEng', 'MpDefenderCoreService', 'NisSrv')
     Index    = @('SearchIndexer', 'SearchProtocolHost', 'SearchFilterHost')
 }
 
@@ -200,6 +231,18 @@ function Get-OdDrive {
 function Get-DiskRaw { @(Get-CimInstance Win32_PerfRawData_PerfDisk_PhysicalDisk -Filter "Name<>'_Total'") }
 function Get-MemRaw  { Get-CimInstance Win32_PerfRawData_PerfOS_Memory }
 
+# Uso do arquivo de paginacao (_Total). PercentUsage bruto = paginas de 4 KB em uso;
+# _Base = tamanho do arquivo em paginas. Arquivo de paginacao cheio + pouca RAM livre =
+# falta de RAM de verdade (Page Reads/s sozinho nao diz isso).
+function Get-PagingFile {
+    $p = Get-CimInstance Win32_PerfRawData_PerfOS_PagingFile -Filter "Name='_Total'" -ErrorAction SilentlyContinue
+    if (-not $p -or -not [double]$p.PercentUsage_Base) { return $null }
+    [pscustomobject]@{
+        Pct = 100 * [double]$p.PercentUsage / [double]$p.PercentUsage_Base
+        MB  = [double]$p.PercentUsage * 4KB / 1MB
+    }
+}
+
 # Um objeto por PID. Nao usa o nome da instancia como chave (OneDrive#1 muda quando processos saem).
 function Get-ProcRaw {
     $t = @{}
@@ -214,7 +257,11 @@ function Get-ProcRaw {
 # O tempo de latencia acumulado (10 MHz) estoura a cada poucos minutos de I/O.
 function Get-Delta32($Old, $New) {
     $d = [double]$New - [double]$Old
-    if ($d -lt 0) { $d += 4294967296.0 }
+    if ($d -lt 0) {
+        # So e volta do contador de 32 bits se o valor antigo estava perto do teto;
+        # caso contrario (reinicio do contador, troca de instancia) descarta a amostra.
+        if ([double]$Old -gt 3.0e9) { $d += 4294967296.0 } else { $d = 0.0 }
+    }
     $d
 }
 
@@ -234,10 +281,10 @@ function Get-DiskBusy($a, $b) {
         $lat  = if ($nb -gt 0) { (Get-Delta32 $o.AvgDisksecPerTransfer $x.AvgDisksecPerTransfer) / [double]$x.Frequency_PerfTime / $nb * 1000 } else { 0 }
         [pscustomobject]@{
             Name  = $x.Name
-            Busy  = [math]::Min(100, [math]::Max(0, 100 * (1 - $idle)))
+            Busy  = [math]::Min(100.0, [math]::Max(0.0, [double](100 * (1 - $idle))))
             Queue = ([double]$x.AvgDiskQueueLength - [double]$o.AvgDiskQueueLength) / $dt
-            Iops  = if ($secs -gt 0) { [math]::Max(0, $n) / $secs } else { 0 }
-            LatMs = [math]::Max(0, $lat)
+            Iops  = if ($secs -gt 0) { [math]::Max(0.0, [double]$n) / $secs } else { 0 }
+            LatMs = [math]::Max(0.0, [double]$lat)
         }
     }
 }
@@ -256,76 +303,124 @@ function Get-Stat($values, [string]$Kind) {
     }
 }
 
-function Col($rows, [string]$Name) { foreach ($r in $rows) { N $r.$Name } }
+# Valores de uma coluna. Aceita nomes alternativos para ler CSVs de versoes anteriores
+# (ex.: AntivirusOpsS, antes DefenderOpsS): usa o primeiro que existir na linha.
+function Col($rows, [string[]]$Names) {
+    foreach ($r in $rows) {
+        $v = $null
+        foreach ($n in $Names) { if ($null -ne $r.$n -and $r.$n -ne '') { $v = $r.$n; break } }
+        N $v
+    }
+}
 
 function Get-Mode($rows, [string]$Name) {
     ($rows | Group-Object $Name | Sort-Object Count -Descending | Select-Object -First 1).Name
 }
 
+# Fase de cada minuto em relacao ao inicio do motor de sync:
+#   inicio   = primeiros StartMinutes minutos (sincronizacao inicial: varre tudo apos o login/restart)
+#   resto    = depois disso (o efeito do trabalho do usuario no dia)
+#   sem sync = OneDrive.Sync.Service nao estava rodando
+# Usa SyncInicio (hora real de inicio do processo). CSVs antigos nao tem essa coluna: o inicio e
+# estimado pela primeira aparicao do PID nos CSVs, o que erra se o monitor abriu depois do OneDrive.
+function Add-Phase($rows) {
+    $fmt = 'yyyy-MM-dd HH:mm:ss'
+    $firstSeen = @{}
+    foreach ($r in ($rows | Sort-Object Hora)) {
+        if ($r.SyncPid -and -not $firstSeen.ContainsKey($r.SyncPid)) {
+            $firstSeen[$r.SyncPid] = [datetime]::ParseExact($r.Hora, $fmt, $null)
+        }
+    }
+    $estimated = 0
+    foreach ($r in $rows) {
+        $fase = 'sem sync'
+        if ($r.SyncPid) {
+            if ($r.SyncInicio) { $start = [datetime]::ParseExact($r.SyncInicio, $fmt, $null) }
+            else { $start = $firstSeen[$r.SyncPid]; $estimated++ }
+            $mins = ([datetime]::ParseExact($r.Hora, $fmt, $null) - $start).TotalMinutes
+            $fase = if ($mins -lt $StartMinutes) { 'inicio' } else { 'resto' }
+        }
+        $r | Add-Member -NotePropertyName Fase -NotePropertyValue $fase -Force
+    }
+    $estimated
+}
+
+function Get-PhaseOrder([string]$Fase) { switch ($Fase) { 'inicio' { 0 } 'resto' { 1 } default { 2 } } }
+
 function Show-Report {
     $files = @(Get-ChildItem $OutDir -Filter 'onedrive-watch-*.csv' -ErrorAction SilentlyContinue | Sort-Object Name)
     if (-not $files) { Write-Host "Nenhum CSV do monitor em $OutDir"; return }
 
-    $rows = foreach ($f in $files) { Import-Csv $f.FullName -UseCulture }
+    $rows = @(foreach ($f in $files) { Import-Csv $f.FullName -UseCulture })
+    # Fase antes do filtro de horario: o inicio do sync pode ter sido antes de FromHour.
+    $estimated = Add-Phase $rows
     $rows = @($rows | Where-Object {
         $h = [int]$_.Hora.Substring(11, 2); $h -ge $FromHour -and $h -lt $ToHour })
     if (-not $rows) { Write-Host 'Nenhuma linha no horario pedido.'; return }
 
-    $groups = $rows | Group-Object { $_.Hora.Substring(0, 10) }, Config, Rotulo
+    $slow = { (N $_.DiscoLatMs) -ge $SlowLatMs }
 
+    $groups = $rows | Group-Object { $_.Hora.Substring(0, 10) }, Config, Rotulo, Fase
     $summary = foreach ($g in $groups) {
         $r = $g.Group
         $totRam = foreach ($x in $r) { (N $x.SyncRamMB) + (N $x.OdRamMB) + (N $x.OdOutrosRamMB) }
         [pscustomobject]@{
-            Dia           = $r[0].Hora.Substring(0, 10)
-            Config        = $r[0].Config
-            Rotulo        = $r[0].Rotulo
-            Ativo         = Get-Mode $r 'AjusteAtivo'
-            Min           = $r.Count
-            'Disco%'      = Get-Stat (Col $r 'DiscoOcupMed') 'avg'
-            'Em100%'      = Get-Stat (Col $r 'DiscoPct95') 'avg'
-            MinSat        = @($r | Where-Object { (N $_.DiscoPct95) -ge 50 }).Count
-            Iops          = Get-Stat (Col $r 'DiscoIops') 'avg'
-            LatMs         = Get-Stat (Col $r 'DiscoLatMs') 'avg'
-            LatP95        = Get-Stat (Col $r 'DiscoLatMs') 'p95'
-            PgRd          = Get-Stat (Col $r 'PageReadsS') 'avg'
-            PgRdP95       = Get-Stat (Col $r 'PageReadsS') 'p95'
-            LivreMB       = Get-Stat (Col $r 'RamLivreMB') 'avg'
-            SyncPrivMB    = Get-Stat (Col $r 'SyncPrivMB') 'avg'
-            SyncMB        = Get-Stat (Col $r 'SyncRamMB') 'avg'
-            SyncP95       = Get-Stat (Col $r 'SyncRamMB') 'p95'
-            OdMB          = Get-Stat (Col $r 'OdRamMB') 'avg'
-            TotOdMB       = Get-Stat $totRam 'avg'
-            TetoWS        = Get-Mode $r 'SyncWsTetoMB'
-            SyncIO        = Get-Stat (Col $r 'SyncIoMBs') 'avg'
-            OdIO          = Get-Stat (Col $r 'OdIoMBs') 'avg'
-            DefIO         = Get-Stat (Col $r 'DefenderIoMBs') 'avg'
-            IdxIO         = Get-Stat (Col $r 'IndexIoMBs') 'avg'
+            Dia        = $r[0].Hora.Substring(0, 10)
+            Config     = $r[0].Config
+            Rotulo     = $r[0].Rotulo
+            Fase       = $r[0].Fase
+            Ativo      = Get-Mode $r 'AjusteAtivo'
+            Min        = $r.Count
+            # Metrica principal: latencia do disco.
+            LatMs      = Get-Stat (Col $r 'DiscoLatMs') 'avg'
+            LatP95     = Get-Stat (Col $r 'DiscoLatMs') 'p95'
+            MinLentos  = @($r | Where-Object $slow).Count
+            Iops       = Get-Stat (Col $r 'DiscoIops') 'avg'
+            'Ocup%'    = Get-Stat (Col $r 'DiscoOcupMed') 'avg'
+            'Em100%'   = Get-Stat (Col $r 'DiscoPct95') 'avg'
+            PgRd       = Get-Stat (Col $r 'PageReadsS') 'avg'
+            'PagUso%'  = Get-Stat (Col $r 'PaginacaoUsoPct') 'avg'
+            PagUsoMB   = Get-Stat (Col $r 'PaginacaoUsoMB') 'max'
+            LivreMB    = Get-Stat (Col $r 'RamLivreMB') 'avg'
+            SyncPrivMB = Get-Stat (Col $r 'SyncPrivMB') 'avg'
+            SyncMB     = Get-Stat (Col $r 'SyncRamMB') 'avg'
+            OdMB       = Get-Stat (Col $r 'OdRamMB') 'avg'
+            TotOdMB    = Get-Stat $totRam 'avg'
+            TetoWS     = Get-Mode $r 'SyncWsTetoMB'
+            SyncOps    = Get-Stat (Col $r 'SyncOpsS') 'avg'
+            OdOps      = Get-Stat (Col $r 'OdOpsS') 'avg'
+            AvOps      = Get-Stat (Col $r 'AntivirusOpsS', 'DefenderOpsS') 'avg'
+            IdxOps     = Get-Stat (Col $r 'IndexOpsS') 'avg'
+            SyncIO     = Get-Stat (Col $r 'SyncIoMBs') 'avg'
+            OdIO       = Get-Stat (Col $r 'OdIoMBs') 'avg'
+            AvIO       = Get-Stat (Col $r 'AntivirusIoMBs', 'DefenderIoMBs') 'avg'
+            IdxIO      = Get-Stat (Col $r 'IndexIoMBs') 'avg'
         }
     }
+    $summary = @($summary | Sort-Object Dia, Config, Rotulo, @{ e = { Get-PhaseOrder $_.Fase } })
 
-    # Quem fazia I/O nos minutos em que o disco passou pelo menos metade do tempo em 100%.
-    $sat = foreach ($g in ($rows | Where-Object { (N $_.DiscoPct95) -ge 50 } |
-                           Group-Object { $_.Hora.Substring(0, 10) }, Config)) {
+    # Quem fazia I/O nos minutos LENTOS (latencia media >= SlowLatMs).
+    $lent = foreach ($g in ($rows | Where-Object $slow | Group-Object { $_.Hora.Substring(0, 10) }, Config, Fase)) {
         $r = $g.Group
         [pscustomobject]@{
-            Dia      = $r[0].Hora.Substring(0, 10)
-            Config   = $r[0].Config
-            MinSat   = $r.Count
-            SyncIO   = Get-Stat (Col $r 'SyncIoMBs') 'avg'
-            OdIO     = Get-Stat (Col $r 'OdIoMBs') 'avg'
-            DefIO    = Get-Stat (Col $r 'DefenderIoMBs') 'avg'
-            IdxIO    = Get-Stat (Col $r 'IndexIoMBs') 'avg'
-            SyncOps  = Get-Stat (Col $r 'SyncOpsS') 'avg'
-            OdOps    = Get-Stat (Col $r 'OdOpsS') 'avg'
-            DefOps   = Get-Stat (Col $r 'DefenderOpsS') 'avg'
-            IdxOps   = Get-Stat (Col $r 'IndexOpsS') 'avg'
-            PgRd     = Get-Stat (Col $r 'PageReadsS') 'avg'
-            TopFora  = Get-Mode $r 'TopIoProc'
-            TopIO    = Get-Stat (Col $r 'TopIoMBs') 'avg'
-            TopOps   = Get-Mode $r 'TopOpsProc'
+            Dia       = $r[0].Hora.Substring(0, 10)
+            Config    = $r[0].Config
+            Fase      = $r[0].Fase
+            MinLentos = $r.Count
+            LatMs     = Get-Stat (Col $r 'DiscoLatMs') 'avg'
+            SyncOps   = Get-Stat (Col $r 'SyncOpsS') 'avg'
+            OdOps     = Get-Stat (Col $r 'OdOpsS') 'avg'
+            AvOps     = Get-Stat (Col $r 'AntivirusOpsS', 'DefenderOpsS') 'avg'
+            IdxOps    = Get-Stat (Col $r 'IndexOpsS') 'avg'
+            SyncIO    = Get-Stat (Col $r 'SyncIoMBs') 'avg'
+            AvIO      = Get-Stat (Col $r 'AntivirusIoMBs', 'DefenderIoMBs') 'avg'
+            IdxIO     = Get-Stat (Col $r 'IndexIoMBs') 'avg'
+            PgRd      = Get-Stat (Col $r 'PageReadsS') 'avg'
+            TopFora   = Get-Mode $r 'TopIoProc'
+            TopOps    = Get-Mode $r 'TopOpsProc'
         }
     }
+    $lent = @($lent | Sort-Object Dia, Config, @{ e = { Get-PhaseOrder $_.Fase } })
 
     # Memoria: quem aparece no top 5 de memoria privada, por dia. Processo fora do top 5
     # num minuto conta 0 naquele minuto, entao a media e um piso (aproximada).
@@ -345,20 +440,29 @@ function Show-Report {
         } | Sort-Object 'MB medio' -Descending | Select-Object -First 8
     }
 
-    Write-Host ("`n== Resumo por dia e configuracao (horas {0}-{1}) ==" -f $FromHour, $ToHour) -ForegroundColor Cyan
-    Write-Host 'Em100% = % do tempo com disco >= 95% | MinSat = minutos com disco em 100% por metade do minuto ou mais'
-    Write-Host 'RAM em MB: SyncPrivMB = memoria privada (custo real); *MB = working set (o Windows reduz sozinho) | IO em MB/s | PgRd = Page Reads/s'
-    # Duas tabelas para caber no console; o CSV do resumo leva todas as colunas.
-    Write-Host 'Iops/LatMs = operacoes e latencia media do disco (em SSD, latencia alta = saturado de verdade)'
-    Write-Host ($summary | Format-Table Dia, Config, Rotulo, Ativo, Min, 'Disco%', 'Em100%', MinSat, Iops, LatMs, LatP95, PgRd, PgRdP95, LivreMB -AutoSize |
+    Write-Host ("`n== Resumo por dia, configuracao e fase (horas {0}-{1}) ==" -f $FromHour, $ToHour) -ForegroundColor Cyan
+    Write-Host ("Fase: inicio = primeiros {0} min apos cada inicio do OneDrive | resto = depois disso | sem sync = motor de sync parado" -f $StartMinutes)
+    Write-Host ("METRICA PRINCIPAL: LatMs / LatP95 = latencia do disco (media / p95, ms). MinLentos = minutos com latencia >= {0} ms" -f $SlowLatMs)
+    Write-Host 'Ocup% e Em100% sao so referencia: em SSD o disco marca 100% ocupado com latencia baixa'
+    if ($estimated) {
+        Write-Host ("(!) {0} linha(s) de CSV antigo sem SyncInicio: inicio do OneDrive estimado pela 1a aparicao do PID" -f $estimated) -ForegroundColor Yellow
+    }
+    # Tabelas separadas para caber no console; o CSV do resumo leva todas as colunas.
+    Write-Host ($summary | Format-Table Dia, Config, Rotulo, Fase, Ativo, Min, LatMs, LatP95, MinLentos, Iops, 'Ocup%', 'Em100%' -AutoSize |
         Out-String -Width 400).TrimEnd()
-    Write-Host ($summary | Format-Table Dia, Config, Rotulo, SyncPrivMB, SyncMB, SyncP95, OdMB, TotOdMB, TetoWS, SyncIO, OdIO, DefIO, IdxIO -AutoSize |
+    Write-Host "`nMemoria: PagUso% / PagUsoMB = uso do arquivo de paginacao (media / maximo) - com LivreMB baixo, e falta de RAM."
+    Write-Host 'PgRd = Page Reads/s: leituras de disco por falta de pagina, INCLUI arquivos fora do cache (nao e so paginacao).'
+    Write-Host 'SyncPrivMB = memoria privada do sync (custo real); SyncMB/OdMB/TotOdMB = working set (o Windows reduz sozinho).'
+    Write-Host ($summary | Format-Table Dia, Config, Fase, 'PagUso%', PagUsoMB, LivreMB, PgRd, SyncPrivMB, SyncMB, OdMB, TotOdMB, TetoWS -AutoSize |
+        Out-String -Width 400).TrimEnd()
+    Write-Host "`nI/O por grupo (Ops = operacoes/s, incluindo abrir/listar/ler atributos; IO = MB/s). Av = antivirus (ESET + Defender):"
+    Write-Host ($summary | Format-Table Dia, Config, Fase, SyncOps, OdOps, AvOps, IdxOps, SyncIO, OdIO, AvIO, IdxIO -AutoSize |
         Out-String -Width 400).TrimEnd()
 
-    Write-Host "`n== Nos minutos saturados: quem fazia I/O ==" -ForegroundColor Cyan
-    if ($sat) { Write-Host ($sat | Format-Table * -AutoSize | Out-String -Width 400).TrimEnd() }
-    else      { Write-Host '  (nenhum minuto saturado)' }
-    Write-Host 'Ops = operacoes de I/O por segundo, incluindo abrir/listar/ler atributos (o MB/s nao ve isso)'
+    Write-Host ("`n== Nos minutos lentos (latencia >= {0} ms): quem fazia I/O ==" -f $SlowLatMs) -ForegroundColor Cyan
+    if ($lent) { Write-Host ($lent | Format-Table * -AutoSize | Out-String -Width 400).TrimEnd() }
+    else       { Write-Host '  (nenhum minuto lento)' }
+    Write-Host 'TopFora / TopOps = processo de fora dos grupos que mais fez I/O (MB/s / operacoes) nesses minutos'
 
     Write-Host "`n== Memoria: top processos por memoria privada (MB) ==" -ForegroundColor Cyan
     if ($mem) { Write-Host ($mem | Format-Table * -AutoSize | Out-String -Width 400).TrimEnd() }
@@ -468,17 +572,17 @@ try {
             $dCpu = [double]$x.PercentProcessorTime - $(if ($o) { [double]$o.PercentProcessorTime } else { 0 })
             $dPf  = [double]$x.PageFaultsPersec - $(if ($o) { [double]$o.PageFaultsPersec } else { 0 })
             # Operacoes de I/O (dados + outras: abrir, listar pasta, ler atributos). IODataBytes nao ve
-            # varredura de pastas e metadados, que e boa parte do trabalho do OneDrive/Defender/indexador.
+            # varredura de pastas e metadados, que e boa parte do trabalho do OneDrive/antivirus/indexador.
             $dOps = [double]$x.IODataOperationsPersec + [double]$x.IOOtherOperationsPersec -
                     $(if ($o) { [double]$o.IODataOperationsPersec + [double]$o.IOOtherOperationsPersec } else { 0 })
             if (-not $agg.ContainsKey($name)) {
                 $agg[$name] = [pscustomobject]@{ Io = 0.0; Ops = 0.0; Cpu = 0.0; Ws = 0.0; Priv = 0.0; Pf = 0.0 }
             }
             $a = $agg[$name]
-            $a.Io   += [math]::Max(0, $dIo) / $secs
-            $a.Ops  += [math]::Max(0, $dOps) / $secs
-            $a.Cpu  += [math]::Max(0, $dCpu) / ($secs * 1e7) / $ncpu * 100
-            $a.Pf   += [math]::Max(0, $dPf) / $secs
+            $a.Io   += [math]::Max(0.0, [double]$dIo) / $secs
+            $a.Ops  += [math]::Max(0.0, [double]$dOps) / $secs
+            $a.Cpu  += [math]::Max(0.0, [double]$dCpu) / ($secs * 1e7) / $ncpu * 100
+            $a.Pf   += [math]::Max(0.0, [double]$dPf) / $secs
             $a.Ws   += [double]$x.WorkingSet
             $a.Priv += [double]$x.PrivateBytes
         }
@@ -503,9 +607,11 @@ try {
 
         # Estado real do motor de sync (o IFEO so vale apos reiniciar o OneDrive).
         $sp = Get-Process -Name 'OneDrive.Sync.Service' -ErrorAction SilentlyContinue | Select-Object -First 1
-        $syncCpuPrio = $null; $syncIo = $null; $syncWs = $null; $ativo = 'n/a'
+        $syncCpuPrio = $null; $syncIo = $null; $syncWs = $null; $syncStart = $null; $ativo = 'n/a'
         if ($sp) {
             try { $syncCpuPrio = [string]$sp.PriorityClass } catch {}
+            # Inicio do processo: o -Report separa a primeira hora (sincronizacao inicial) do resto do dia.
+            try { $syncStart = $sp.StartTime.ToString('yyyy-MM-dd HH:mm:ss') } catch {}
             $syncIo = [OdtNative]::IoPriority($sp.Id)
             $kb = [OdtNative]::HardWsMaxKB($sp.Id)
             $syncWs = if ($kb -ge 0) { [int]($kb / 1024) } else { $null }
@@ -530,7 +636,8 @@ try {
         $dLat  = if ($sumN -gt 0) { (($odW | ForEach-Object { $_.Iops * $_.LatMs }) | Measure-Object -Sum).Sum / $sumN } else { $null }
 
         $pr = ([double]$curMem.PageReadsPersec - [double]$prevMem.PageReadsPersec) / $secs
-        $S = $grp['Sync']; $O = $grp['Od']; $X = $grp['OdOutros']; $D = $grp['Defender']; $I = $grp['Index']
+        $pg = Get-PagingFile
+        $S = $grp['Sync']; $O = $grp['Od']; $X = $grp['OdOutros']; $A = $grp['Antivirus']; $I = $grp['Index']
 
         $row = [pscustomobject][ordered]@{
             Hora            = $now.ToString('yyyy-MM-dd HH:mm:ss')
@@ -538,6 +645,7 @@ try {
             Config          = Get-ConfigTag
             AjusteAtivo     = $ativo
             SyncPid         = if ($sp) { $sp.Id } else { $null }
+            SyncInicio      = $syncStart
             SyncPrioCpu     = $syncCpuPrio
             SyncPrioIo      = $syncIo
             SyncWsTetoMB    = $syncWs
@@ -548,7 +656,10 @@ try {
             DiscoIops       = if ($null -ne $dIops) { Rnd $dIops 0 } else { $null }
             DiscoLatMs      = if ($null -ne $dLat)  { Rnd $dLat 2 } else { $null }
             QualquerDiscoPct95 = if ($null -ne $aP95) { Rnd $aP95 } else { $null }
+            # Leituras de disco por falta de pagina: arquivo de paginacao + arquivos fora do cache/mapeados.
             PageReadsS      = Rnd $pr
+            PaginacaoUsoPct = if ($pg) { Rnd $pg.Pct } else { $null }
+            PaginacaoUsoMB  = if ($pg) { [int]$pg.MB } else { $null }
             RamLivreMB      = [int]$curMem.AvailableMBytes
             CommitMB        = [int]([double]$curMem.CommittedBytes / 1MB)
             SyncRamMB       = if ($S.Found) { [int]($S.Ws / 1MB) } else { $null }
@@ -564,9 +675,9 @@ try {
             OdCpuPct        = Rnd $O.Cpu
             OdOutrosRamMB   = [int]($X.Ws / 1MB)
             OdOutrosIoMBs   = Rnd ($X.Io / 1MB) 2
-            DefenderIoMBs   = Rnd ($D.Io / 1MB) 2
-            DefenderOpsS    = Rnd $D.Ops 0
-            DefenderCpuPct  = Rnd $D.Cpu
+            AntivirusIoMBs  = Rnd ($A.Io / 1MB) 2
+            AntivirusOpsS   = Rnd $A.Ops 0
+            AntivirusCpuPct = Rnd $A.Cpu
             IndexIoMBs      = Rnd ($I.Io / 1MB) 2
             IndexOpsS       = Rnd $I.Ops 0
             IndexCpuPct     = Rnd $I.Cpu
@@ -599,9 +710,9 @@ try {
             Write-Warning ("Nao gravei agora ({0} linha(s) pendentes - CSV aberto no Excel?): {1}" -f $pending.Count, $_.Exception.Message)
         }
 
-        Write-Host ("{0}  disco {1,3}% (em 100%: {2,3}% do minuto, {3} IOPS, {4} ms)  sync {5,5} MB  od {6,4} MB  pgrd {7,5}/s  fora: {8} {9} MB/s  [{10}]" -f
-            $now.ToString('HH:mm'), $row.DiscoOcupMed, $row.DiscoPct95, $row.DiscoIops, $row.DiscoLatMs, $row.SyncRamMB, $row.OdRamMB,
-            $row.PageReadsS, $row.TopIoProc, $row.TopIoMBs, $row.Config)
+        Write-Host ("{0}  latencia {1,6} ms  {2,5} IOPS  ocupado {3,3}%  sync priv {4,5} MB  pagefile {5}%  livre {6} MB  fora: {7} {8} MB/s  [{9}]" -f
+            $now.ToString('HH:mm'), $row.DiscoLatMs, $row.DiscoIops, $row.DiscoOcupMed, $row.SyncPrivMB,
+            $row.PaginacaoUsoPct, $row.RamLivreMB, $row.TopIoProc, $row.TopIoMBs, $row.Config)
     }
 } finally {
     $mutex.ReleaseMutex()

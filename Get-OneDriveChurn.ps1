@@ -63,8 +63,17 @@ param(
     [string]$Label = 'churn',
 
     # Padrao: subpasta reports ao lado do script.
-    [string]$OutDir = (Join-Path $PSScriptRoot 'reports')
+    [string]$OutDir = ''
 )
+
+# Pasta de relatorios padrao: reports\ ao lado do script. Resolvido aqui, e nao no
+# valor padrao do parametro, porque no Windows PowerShell 5.1 o $PSScriptRoot fica
+# vazio dentro do param() quando o script e chamado com "powershell.exe -File"
+# (como faz o atalho de inicializacao).
+if (-not $OutDir) {
+    $scriptDir = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent $MyInvocation.MyCommand.Definition }
+    $OutDir = Join-Path $scriptDir 'reports'
+}
 
 # Relatorios ficam numa pasta "reports" ao lado do script, facil de achar e copiar.
 # A pasta do projeto NAO deve ficar dentro do OneDrive: os arquivos gerados seriam

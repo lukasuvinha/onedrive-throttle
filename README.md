@@ -79,7 +79,7 @@ Depois de aplicar: **logoff/login ou reboot**. Confira com `-Action Status` — 
 .\Get-OneDriveDiag.ps1 -Label prioridade    # depois do -Action Apply
 ```
 
-Compare principalmente: *Disco ocupado*, *Page Reads/s* e a linha do `OneDrive`. Para comparar dias, use o monitor contínuo abaixo. Se o total de itens passar de **300 mil**, está acima do recomendado pela Microsoft (ver [docs/COMO-FUNCIONA.md](docs/COMO-FUNCIONA.md)).
+Compare principalmente: *Disco ocupado*, o uso do arquivo de paginação com a RAM disponível e a linha do `OneDrive`. *Page Reads/s* inclui leituras de arquivos fora do cache, então sozinho não indica falta de RAM. Para comparar dias, use o monitor contínuo abaixo. Se o total de itens passar de **300 mil**, está acima do recomendado pela Microsoft (ver [docs/COMO-FUNCIONA.md](docs/COMO-FUNCIONA.md)).
 
 ## Monitor contínuo (comparar dias)
 
@@ -92,7 +92,7 @@ Uma medição de 3 minutos depende muito do momento. `Watch-OneDrive.ps1` roda o
 .\Watch-OneDrive.ps1 -RemoveStartup                   # para de abrir no login
 ```
 
-Por minuto ele grava: % ocupado do disco da pasta do OneDrive (amostrado a cada 5 s, com a fração do minuto em ≥ 95%), Page Reads/s, RAM livre, RAM/disco/CPU do `OneDrive.Sync.Service`, do `OneDrive`, do Defender e do indexador, e o processo de fora dessa lista que mais fez I/O. Também grava a configuração do IFEO em vigor (`Config`) e se o motor de sync **realmente** está com ela (`AjusteAtivo`, prioridade de I/O e teto de working set lidos do processo) — o IFEO só vale depois que o OneDrive reinicia.
+Por minuto ele grava: latência, IOPS e % ocupado do disco da pasta do OneDrive (amostrado a cada 5 s), uso do arquivo de paginação, RAM livre, Page Reads/s, RAM/disco/CPU do `OneDrive.Sync.Service`, do `OneDrive`, do antivírus (ESET e Defender) e do indexador, e o processo de fora dessa lista que mais fez I/O. O `-Report` usa a **latência** como métrica principal e separa os primeiros 60 min após cada início do OneDrive do resto do dia. Também grava a configuração do IFEO em vigor (`Config`) e se o motor de sync **realmente** está com ela (`AjusteAtivo`, prioridade de I/O e teto de working set lidos do processo) — o IFEO só vale depois que o OneDrive reinicia.
 
 > Usa o % ocupado **por disco**, não o `_Total`: o `_Total` é a média dos discos e esconde um disco em 100% ao lado de um ocioso. Em SSD, olhe também a latência (`DiscoLatMs`): 100% ocupado com latência baixa não é gargalo.
 

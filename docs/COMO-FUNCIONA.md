@@ -9,7 +9,7 @@ A lentidão quase nunca vem só do OneDrive. Cada arquivo que o usuário salva n
 ```
 usuário salva arquivo
    ├─► OneDrive: lê o arquivo, calcula o hash, envia para a nuvem
-   ├─► Defender: varre o arquivo em tempo real (e de novo quando o OneDrive o lê)
+   ├─► Antivírus (ESET; ou Defender): varre o arquivo em tempo real (e de novo quando o OneDrive o lê)
    └─► Windows Search: reindexa o conteúdo
 ```
 
@@ -28,16 +28,33 @@ O objetivo do projeto é **medir** de onde vem a carga e **aplicar só o ajuste 
 
 Todos os relatórios vão para a pasta **`reports\`**, ao lado dos scripts.
 
-### O que o monitor mede, e por que mais de um número de disco
+### O que o monitor mede, e por que a latência é a métrica principal
 
-Em SSD, "% ocupado" só quer dizer que havia pelo menos uma operação pendente. Um SSD pode marcar 100% e ainda responder em 0,5 ms. Por isso o monitor grava, para o disco da pasta do OneDrive:
+Em SSD, "% ocupado" só quer dizer que havia pelo menos uma operação pendente. Na validação, o disco ficou "100% ocupado" na maior parte da manhã com latência mediana de ~5 ms, ou seja, sem gargalo real. Por isso a **métrica principal é a latência** do disco da pasta do OneDrive:
 
-- **% ocupado** e a fração do minuto em ≥ 95% (`DiscoPct95`);
-- **IOPS** (`DiscoIops`) e **latência média** (`DiscoLatMs`). Latência subindo para dezenas de ms é saturação de verdade.
+- **Latência média** (`DiscoLatMs`), ponderada pelas operações. O `-Report` mostra média, p95 e "minutos lentos" (latência ≥ 20 ms, ajustável com `-SlowLatMs`). SSD SATA saudável fica abaixo de ~5 ms; dezenas de ms são saturação de verdade.
+- **IOPS** (`DiscoIops`), para saber quanto trabalho havia.
+- **% ocupado** e a fração do minuto em ≥ 95% (`DiscoPct95`) continuam no CSV, só como referência.
 
-Por processo ele grava **MB/s** e também **operações/s** (`*OpsS`). O MB/s não enxerga abrir arquivo, listar pasta e ler atributos, que são boa parte do trabalho do OneDrive, do Defender e do indexador. Nos testes, já houve minuto com disco ocupado e nenhum processo com MB/s relevante.
+Por processo ele grava **MB/s** e também **operações/s** (`*OpsS`). O MB/s não enxerga abrir arquivo, listar pasta e ler atributos, que são boa parte do trabalho do OneDrive, do antivírus e do indexador. Nos testes, já houve minuto com disco ocupado e nenhum processo com MB/s relevante.
 
-Para a memória, grava `PageReadsS` (leituras do arquivo de paginação), RAM livre, commit e o **top 5 de memória privada** de todos os processos (`TopMemMB`). Isso mostra se quem empurra a máquina para a paginação é o OneDrive ou outro programa.
+O grupo **Antivírus** soma o ESET (`ekrn`, `egui`, o antivírus da empresa) e o Defender (`MsMpEng` e serviços), porque uma máquina pode ter um, o outro ou os dois. Nos CSVs antigos as colunas se chamavam `Defender*`; o `-Report` lê os dois nomes.
+
+### Memória: Page Reads/s não é só paginação
+
+`PageReadsS` (Page Reads/s) conta **toda leitura de disco feita por falta de página**. Isso inclui o arquivo de paginação, mas também arquivos que não estavam no cache do Windows e arquivos mapeados em memória: o cache do Windows lê arquivos por esse mesmo mecanismo. Na validação, o Page Reads/s ficou em ~1.850/s com 4 GB de RAM livre e acompanhava as IOPS do disco. Eram leituras de arquivo, não falta de RAM.
+
+Para falta de RAM, o monitor grava o **uso do arquivo de paginação** (`PaginacaoUsoPct` e `PaginacaoUsoMB`, de `Win32_PerfRawData_PerfOS_PagingFile`), além da RAM livre e do commit. **Falta de RAM = arquivo de paginação enchendo + RAM livre baixa.** O **top 5 de memória privada** (`TopMemMB`) mostra quem consome a RAM: o OneDrive ou outro programa.
+
+### Primeira hora depois de iniciar o OneDrive
+
+Ao iniciar (login, reboot, atualização, crash), o motor de sync reverifica as pastas sincronizadas, e essa primeira hora costuma ser bem mais pesada que o resto do dia. O monitor grava a hora de início do processo (`SyncInicio`), e o `-Report` separa cada linha em uma fase:
+
+- **inicio**: primeiros 60 min após cada início do OneDrive (ajustável com `-StartMinutes`);
+- **resto**: o restante do dia, que reflete o trabalho do usuário;
+- **sem sync**: o motor de sync não estava rodando. Serve de comparação: o que sobra de carga sem o OneDrive.
+
+Assim, um dia com vários reinícios do OneDrive não parece pior só por causa das sincronizações iniciais. Nos CSVs antigos (sem `SyncInicio`), o início é estimado pela primeira vez que o processo aparece no CSV.
 
 O monitor mede o disco **por disco**, nunca pelo `_Total`: o `_Total` é a média dos discos e esconde um disco em 100% ao lado de um ocioso. O `Get-OneDriveDiag.ps1` segue a mesma regra.
 
@@ -61,7 +78,7 @@ O Windows lê essa chave **quando o processo inicia**, então:
 O parâmetro `-MaxWorkingSetMB` continua no script, mas **saiu do protocolo de teste e não é recomendado**. Ele limita só o *working set* (a parte da memória que está na RAM física naquele momento), e a validação mostrou que isso não ataca o problema:
 
 - **O Windows já faz isso sozinho.** Quando falta RAM, ele tira páginas do motor de sync. Na validação, o working set do `OneDrive.Sync.Service` caiu para ~100 MB, enquanto a memória privada continuou em ~960 MB. O número que o Gerenciador de Tarefas mostra engana.
-- **O custo real é a memória privada.** É a memória que o processo alocou e que ocupa RAM ou arquivo de paginação; o teto não reduz um byte dela. O que passa do teto vai para o arquivo de paginação e volta como **leitura de disco** (Page Reads/s) quando o sync precisa dela. Ou seja, o teto troca RAM por disco, e disco é justamente o que se quer aliviar.
+- **O custo real é a memória privada.** É a memória que o processo alocou e que ocupa RAM ou arquivo de paginação; o teto não reduz um byte dela. O que passa do teto vai para o arquivo de paginação e volta como **leitura de disco** quando o sync precisa dela. Ou seja, o teto troca RAM por disco, e disco é justamente o que se quer aliviar.
 - **A memória privada do sync cresce com a quantidade de itens sincronizados.** O que a reduz é sincronizar menos itens (ver *Limitações conhecidas*), não um limite no processo.
 
 O monitor grava as duas medidas (`SyncRamMB` = working set, `SyncPrivMB` = privada). Para avaliar a RAM do OneDrive, use a privada.
@@ -86,10 +103,10 @@ As mesmas chaves que o GPO/ADMX do OneDrive grava:
 
 ## Ajustes fora do script (dependem dos números)
 
-Se o monitor mostrar que o Defender ou o indexador são parte relevante da carga:
+Se o monitor mostrar que o antivírus ou o indexador são parte relevante da carga:
 
 - **Indexador:** tirar as pastas do OneDrive da indexação do Windows Search. Custo: a busca pelo *conteúdo* dos arquivos no Explorer fica lenta (a busca por nome continua funcionando).
-- **Defender:** excluir os *processos* do OneDrive (não as pastas) da varredura evita varrer duas vezes o mesmo arquivo. Custo de segurança: arquivos *baixados* da nuvem pelo OneDrive só são varridos quando alguém os abre. Decisão a tomar com dados e com cuidado.
+- **Antivírus (ESET; ou Defender):** excluir os *processos* do OneDrive (não as pastas) da varredura evita varrer duas vezes o mesmo arquivo. Se o ESET for gerenciado por console (ESET PROTECT), a exclusão costuma ir na política do console, não na máquina. Custo de segurança: arquivos *baixados* da nuvem pelo OneDrive só são varridos quando alguém os abre. Decisão a tomar com dados e com cuidado.
 
 ## Limitações conhecidas
 
