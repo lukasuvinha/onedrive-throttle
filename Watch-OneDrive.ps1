@@ -7,6 +7,15 @@
     Nao altera nada no sistema (so le contadores e registro).
 
     O que e medido em cada intervalo (padrao 60 s):
+      - TRAVAMENTOS (o problema que o usuario sente): a cada DiskInterval s,
+        quantas janelas estao "Nao respondendo" (Get-Process com janela
+        principal + IsHungAppWindow, o mesmo criterio do titulo "(Nao
+        respondendo)" do Windows). Por minuto: em quantas amostras houve
+        janela travada (TravaAmostras de Amostras), o maximo de janelas
+        travadas juntas e quais processos travaram (TravaProcs).
+        Nao usa Process.Responding: ele acusa app UWP suspenso (ex.:
+        Configuracoes minimizado) e pode bloquear ate 5 s.
+      - CPU total da maquina: media e pico das amostras (CpuTotalPct/Max).
       - Disco onde fica a pasta do OneDrive, amostrado a cada DiskInterval s
         (padrao 5): LATENCIA media (metrica principal: em SSD e ela que mostra
         saturacao), IOPS, % ocupado e a % do minuto em que ficou >= 95%.
@@ -170,6 +179,12 @@ public static class OdtNative {
     static extern bool GetProcessWorkingSetSizeEx(IntPtr h, out UIntPtr min, out UIntPtr max, out uint flags);
     [DllImport("ntdll.dll")]
     static extern int NtQueryInformationProcess(IntPtr h, int infoClass, ref int info, int len, out int retLen);
+    [DllImport("user32.dll")]
+    static extern bool IsHungAppWindow(IntPtr hWnd);
+
+    // Mesmo criterio do "(Nao respondendo)" do Windows: a janela nao processa mensagens ha ~5 s.
+    // Nao bloqueia (Process.Responding pode esperar ate 5 s) e nao acusa app UWP suspenso.
+    public static bool IsHung(IntPtr hWnd) { return hWnd != IntPtr.Zero && IsHungAppWindow(hWnd); }
 
     // 0 VeryLow, 1 Low, 2 Normal; -1 = nao foi possivel ler
     public static int IoPriority(int pid) {
@@ -230,6 +245,28 @@ function Get-OdDrive {
 
 function Get-DiskRaw { @(Get-CimInstance Win32_PerfRawData_PerfDisk_PhysicalDisk -Filter "Name<>'_Total'") }
 function Get-MemRaw  { Get-CimInstance Win32_PerfRawData_PerfOS_Memory }
+
+# CPU total da maquina (_Total de todos os nucleos). PercentProcessorTime bruto conta o tempo
+# OCIOSO em 100 ns (contador invertido): ocupado = 1 - ocioso / tempo decorrido.
+function Get-CpuRaw { Get-CimInstance Win32_PerfRawData_PerfOS_Processor -Filter "Name='_Total'" }
+function Get-CpuBusy($a, $b) {
+    $dt = [double]$b.Timestamp_Sys100NS - [double]$a.Timestamp_Sys100NS
+    if ($dt -le 0) { return $null }
+    [math]::Min(100.0, [math]::Max(0.0, 100 * (1 - ([double]$b.PercentProcessorTime - [double]$a.PercentProcessorTime) / $dt)))
+}
+
+# Janelas "Nao respondendo" agora: processos com janela principal (Get-Process / MainWindowHandle)
+# cuja janela o Windows considera travada. Devolve um nome por janela travada.
+function Get-HungWindows {
+    foreach ($p in Get-Process) {
+        if ($p.Id -eq $PID) { continue }
+        # dwm: quando uma janela trava, o Windows cria uma "janela fantasma" (a copia esbranquicada
+        # com "(Nao respondendo)") que pertence ao dwm.exe. Contar o dwm duplicaria cada travamento.
+        if ($p.ProcessName -eq 'dwm') { continue }
+        try { $h = $p.MainWindowHandle } catch { continue }
+        if ($h -ne [IntPtr]::Zero -and [OdtNative]::IsHung($h)) { $p.ProcessName }
+    }
+}
 
 # Uso do arquivo de paginacao (_Total). PercentUsage bruto = paginas de 4 KB em uso;
 # _Base = tamanho do arquivo em paginas. Arquivo de paginacao cheio + pouca RAM livre =
@@ -359,11 +396,17 @@ function Show-Report {
     if (-not $rows) { Write-Host 'Nenhuma linha no horario pedido.'; return }
 
     $slow = { (N $_.DiscoLatMs) -ge $SlowLatMs }
+    # Linhas que mediram travamento (CSVs antigos nao tem a coluna) e as que tiveram trava.
+    $measured = { $null -ne $_.TravaAmostras -and $_.TravaAmostras -ne '' }
+    $hungRow  = { (N $_.TravaAmostras) -gt 0 }
 
     $groups = $rows | Group-Object { $_.Hora.Substring(0, 10) }, Config, Rotulo, Fase
     $summary = foreach ($g in $groups) {
         $r = $g.Group
         $totRam = foreach ($x in $r) { (N $x.SyncRamMB) + (N $x.OdRamMB) + (N $x.OdOutrosRamMB) }
+        $rm = @($r | Where-Object $measured)
+        $amostras = ($rm | ForEach-Object { N $_.Amostras } | Measure-Object -Sum).Sum
+        $travadas = ($rm | ForEach-Object { N $_.TravaAmostras } | Measure-Object -Sum).Sum
         [pscustomobject]@{
             Dia        = $r[0].Hora.Substring(0, 10)
             Config     = $r[0].Config
@@ -371,7 +414,12 @@ function Show-Report {
             Fase       = $r[0].Fase
             Ativo      = Get-Mode $r 'AjusteAtivo'
             Min        = $r.Count
-            # Metrica principal: latencia do disco.
+            # O que o usuario sente: minutos com alguma janela "Nao respondendo".
+            MinTrava   = if ($rm) { @($rm | Where-Object $hungRow).Count } else { $null }
+            'Trava%'   = if ($amostras) { Rnd (100 * $travadas / $amostras) } else { $null }
+            CpuMed     = Get-Stat (Col $r 'CpuTotalPct') 'avg'
+            CpuP95     = Get-Stat (Col $r 'CpuTotalPct') 'p95'
+            # Metrica principal de disco: latencia.
             LatMs      = Get-Stat (Col $r 'DiscoLatMs') 'avg'
             LatP95     = Get-Stat (Col $r 'DiscoLatMs') 'p95'
             MinLentos  = @($r | Where-Object $slow).Count
@@ -422,6 +470,49 @@ function Show-Report {
     }
     $lent = @($lent | Sort-Object Dia, Config, @{ e = { Get-PhaseOrder $_.Fase } })
 
+    # Travamento x carga: minutos COM e SEM janela travada, lado a lado. Se nos minutos com trava
+    # a latencia/CPU/operacoes do OneDrive sobem, o travamento acompanha a carga; se nao, a causa
+    # e outra (ex.: o programa esperando o OneDrive/rede, sem carga de disco).
+    $trv = foreach ($g in ($rows | Where-Object $measured |
+                           Group-Object { $_.Hora.Substring(0, 10) }, Config, Fase, { if ((N $_.TravaAmostras) -gt 0) { 'com trava' } else { 'sem trava' } })) {
+        $r = $g.Group
+        [pscustomobject]@{
+            Dia      = $r[0].Hora.Substring(0, 10)
+            Config   = $r[0].Config
+            Fase     = $r[0].Fase
+            Minutos  = $g.Values[3]
+            Min      = $r.Count
+            LatMs    = Get-Stat (Col $r 'DiscoLatMs') 'avg'
+            LatP95   = Get-Stat (Col $r 'DiscoLatMs') 'p95'
+            CpuMed   = Get-Stat (Col $r 'CpuTotalPct') 'avg'
+            CpuPico  = Get-Stat (Col $r 'CpuTotalMax') 'avg'
+            SyncOps  = Get-Stat (Col $r 'SyncOpsS') 'avg'
+            OdOps    = Get-Stat (Col $r 'OdOpsS') 'avg'
+            AvOps    = Get-Stat (Col $r 'AntivirusOpsS') 'avg'
+            IdxOps   = Get-Stat (Col $r 'IndexOpsS') 'avg'
+            'PagUso%' = Get-Stat (Col $r 'PaginacaoUsoPct') 'avg'
+            LivreMB  = Get-Stat (Col $r 'RamLivreMB') 'avg'
+        }
+    }
+    $trv = @($trv | Sort-Object Dia, Config, @{ e = { Get-PhaseOrder $_.Fase } }, Minutos)
+
+    # Quem travou: por dia e config, em quantos minutos e amostras cada processo ficou "Nao respondendo".
+    $who = foreach ($g in ($rows | Where-Object { $_.TravaProcs } | Group-Object { $_.Hora.Substring(0, 10) }, Config)) {
+        $g.Group | ForEach-Object { $_.TravaProcs -split ' / ' } | ForEach-Object {
+            $i = $_.LastIndexOf(' ')
+            [pscustomobject]@{ Proc = $_.Substring(0, $i); N = [int]$_.Substring($i + 1) }
+        } | Group-Object Proc | ForEach-Object {
+            [pscustomobject]@{
+                Dia      = $g.Group[0].Hora.Substring(0, 10)
+                Config   = $g.Group[0].Config
+                Processo = $_.Name
+                Minutos  = $_.Count
+                Amostras = ($_.Group | Measure-Object N -Sum).Sum
+                'Seg ~'  = ($_.Group | Measure-Object N -Sum).Sum * $DiskInterval
+            }
+        } | Sort-Object Minutos -Descending | Select-Object -First 10
+    }
+
     # Memoria: quem aparece no top 5 de memoria privada, por dia. Processo fora do top 5
     # num minuto conta 0 naquele minuto, entao a media e um piso (aproximada).
     $mem = foreach ($g in ($rows | Where-Object { $_.TopMemMB } | Group-Object { $_.Hora.Substring(0, 10) })) {
@@ -442,13 +533,14 @@ function Show-Report {
 
     Write-Host ("`n== Resumo por dia, configuracao e fase (horas {0}-{1}) ==" -f $FromHour, $ToHour) -ForegroundColor Cyan
     Write-Host ("Fase: inicio = primeiros {0} min apos cada inicio do OneDrive | resto = depois disso | sem sync = motor de sync parado" -f $StartMinutes)
-    Write-Host ("METRICA PRINCIPAL: LatMs / LatP95 = latencia do disco (media / p95, ms). MinLentos = minutos com latencia >= {0} ms" -f $SlowLatMs)
-    Write-Host 'Ocup% e Em100% sao so referencia: em SSD o disco marca 100% ocupado com latencia baixa'
+    Write-Host ('PROBLEMA REAL: MinTrava = minutos com alguma janela "Nao respondendo"; Trava% = % das amostras de {0} s com janela travada' -f $DiskInterval)
+    Write-Host ("Disco: LatMs / LatP95 = latencia (media / p95, ms). MinLentos = minutos com latencia >= {0} ms. CpuMed/CpuP95 = CPU total da maquina" -f $SlowLatMs)
+    Write-Host 'Ocup% e Em100% (so referencia em SSD) ficam no CSV do resumo. MinTrava vazio = CSV de versao sem medicao de travamento.'
     if ($estimated) {
         Write-Host ("(!) {0} linha(s) de CSV antigo sem SyncInicio: inicio do OneDrive estimado pela 1a aparicao do PID" -f $estimated) -ForegroundColor Yellow
     }
     # Tabelas separadas para caber no console; o CSV do resumo leva todas as colunas.
-    Write-Host ($summary | Format-Table Dia, Config, Rotulo, Fase, Ativo, Min, LatMs, LatP95, MinLentos, Iops, 'Ocup%', 'Em100%' -AutoSize |
+    Write-Host ($summary | Format-Table Dia, Config, Rotulo, Fase, Ativo, Min, MinTrava, 'Trava%', LatMs, LatP95, MinLentos, CpuMed, CpuP95, Iops -AutoSize |
         Out-String -Width 400).TrimEnd()
     Write-Host "`nMemoria: PagUso% / PagUsoMB = uso do arquivo de paginacao (media / maximo) - com LivreMB baixo, e falta de RAM."
     Write-Host 'PgRd = Page Reads/s: leituras de disco por falta de pagina, INCLUI arquivos fora do cache (nao e so paginacao).'
@@ -458,6 +550,17 @@ function Show-Report {
     Write-Host "`nI/O por grupo (Ops = operacoes/s, incluindo abrir/listar/ler atributos; IO = MB/s). Av = antivirus (ESET + Defender):"
     Write-Host ($summary | Format-Table Dia, Config, Fase, SyncOps, OdOps, AvOps, IdxOps, SyncIO, OdIO, AvIO, IdxIO -AutoSize |
         Out-String -Width 400).TrimEnd()
+
+    Write-Host "`n== Travamentos: quem ficou 'Nao respondendo' ==" -ForegroundColor Cyan
+    if ($who) { Write-Host ($who | Format-Table * -AutoSize | Out-String -Width 400).TrimEnd() }
+    else      { Write-Host '  (nenhuma janela travada nas linhas medidas)' }
+    Write-Host ("Minutos = minutos com o processo travado; Amostras x {0} s = tempo aproximado travado" -f $DiskInterval)
+
+    Write-Host "`n== Travamento x carga: minutos com e sem janela travada ==" -ForegroundColor Cyan
+    if ($trv) { Write-Host ($trv | Format-Table * -AutoSize | Out-String -Width 400).TrimEnd() }
+    else      { Write-Host '  (sem dados - CSV de versao sem medicao de travamento)' }
+    Write-Host 'Se latencia/CPU/Ops so sobem nos minutos "com trava", o travamento acompanha a carga. Se ficam iguais,'
+    Write-Host 'o programa trava esperando outra coisa (ex.: o OneDrive ou a rede responderem), nao por disco/CPU cheios.'
 
     Write-Host ("`n== Nos minutos lentos (latencia >= {0} ms): quem fazia I/O ==" -f $SlowLatMs) -ForegroundColor Cyan
     if ($lent) { Write-Host ($lent | Format-Table * -AutoSize | Out-String -Width 400).TrimEnd() }
@@ -523,6 +626,7 @@ try {
     $prevProc = Get-ProcRaw
     $prevMem  = Get-MemRaw
     $prevDisk = Get-DiskRaw
+    $prevCpu  = Get-CpuRaw
     $win      = New-Object System.Collections.Generic.List[object]
     $pending  = New-Object System.Collections.Generic.List[object]
     $stopAt   = if ($DurationMinutes -gt 0) { (Get-Date).AddMinutes($DurationMinutes) } else { [datetime]::MaxValue }
@@ -536,15 +640,22 @@ try {
         $busy = @(Get-DiskBusy $prevDisk $curDisk)
         $prevDisk = $curDisk
         $od = $busy | Where-Object { ($_.Name -split ' ') -contains $odDrive } | Select-Object -First 1
-        if ($busy) {
-            $win.Add([pscustomobject]@{
-                Od    = if ($od) { $od.Busy } else { $null }
-                Queue = if ($od) { $od.Queue } else { $null }
-                Iops  = if ($od) { $od.Iops } else { $null }
-                LatMs = if ($od) { $od.LatMs } else { $null }
-                Any   = ($busy | Measure-Object Busy -Maximum).Maximum
-            })
-        }
+
+        # --- CPU total e janelas "Nao respondendo", na mesma cadencia ---
+        $curCpu = Get-CpuRaw
+        $cpu = Get-CpuBusy $prevCpu $curCpu
+        $prevCpu = $curCpu
+        $hung = @(Get-HungWindows)
+
+        $win.Add([pscustomobject]@{
+            Od    = if ($od) { $od.Busy } else { $null }
+            Queue = if ($od) { $od.Queue } else { $null }
+            Iops  = if ($od) { $od.Iops } else { $null }
+            LatMs = if ($od) { $od.LatMs } else { $null }
+            Any   = if ($busy) { ($busy | Measure-Object Busy -Maximum).Maximum } else { $null }
+            Cpu   = $cpu
+            Hung  = $hung
+        })
 
         if ((Get-Date) -lt $next) { continue }
         $now  = Get-Date
@@ -629,7 +740,20 @@ try {
         $dMax = if ($odW) { ($odW | Measure-Object Od -Maximum).Maximum } else { $null }
         $dP95 = if ($odW) { 100 * @($odW | Where-Object { $_.Od -ge 95 }).Count / $odW.Count } else { $null }
         $dQ   = if ($odW) { ($odW | Measure-Object Queue -Average).Average } else { $null }
-        $aP95 = if ($win.Count) { 100 * @($win | Where-Object { $_.Any -ge 95 }).Count / $win.Count } else { $null }
+        $anyW = @($win | Where-Object { $null -ne $_.Any })
+        $aP95 = if ($anyW) { 100 * @($anyW | Where-Object { $_.Any -ge 95 }).Count / $anyW.Count } else { $null }
+
+        # CPU total: media e pico das amostras de DiskInterval s.
+        $cpuW   = @($win | Where-Object { $null -ne $_.Cpu })
+        $cpuAvg = if ($cpuW) { ($cpuW | Measure-Object Cpu -Average).Average } else { $null }
+        $cpuMax = if ($cpuW) { ($cpuW | Measure-Object Cpu -Maximum).Maximum } else { $null }
+
+        # Travamentos: em quantas amostras havia janela "Nao respondendo" e quais processos.
+        # TravaProcs = "nome amostras / nome amostras", do que travou mais vezes no minuto.
+        $hungW     = @($win | Where-Object { $_.Hung.Count -gt 0 })
+        $hungMax   = if ($win.Count) { ($win | ForEach-Object { $_.Hung.Count } | Measure-Object -Maximum).Maximum } else { 0 }
+        $hungProcs = (@($hungW | ForEach-Object { $_.Hung | Select-Object -Unique }) | Group-Object |
+            Sort-Object Count -Descending | ForEach-Object { '{0} {1}' -f $_.Name, $_.Count }) -join ' / '
         $dIops = if ($odW) { ($odW | Measure-Object Iops -Average).Average } else { $null }
         # Latencia media ponderada pelas operacoes de cada janela.
         $sumN  = ($odW | Measure-Object Iops -Sum).Sum
@@ -646,6 +770,13 @@ try {
             AjusteAtivo     = $ativo
             SyncPid         = if ($sp) { $sp.Id } else { $null }
             SyncInicio      = $syncStart
+            # Janelas "Nao respondendo" (o problema que o usuario sente).
+            Amostras        = $win.Count
+            TravaAmostras   = $hungW.Count
+            TravaJanelasMax = [int]$hungMax
+            TravaProcs      = $hungProcs
+            CpuTotalPct     = if ($null -ne $cpuAvg) { Rnd $cpuAvg } else { $null }
+            CpuTotalMax     = if ($null -ne $cpuMax) { Rnd $cpuMax } else { $null }
             SyncPrioCpu     = $syncCpuPrio
             SyncPrioIo      = $syncIo
             SyncWsTetoMB    = $syncWs
@@ -710,9 +841,10 @@ try {
             Write-Warning ("Nao gravei agora ({0} linha(s) pendentes - CSV aberto no Excel?): {1}" -f $pending.Count, $_.Exception.Message)
         }
 
-        Write-Host ("{0}  latencia {1,6} ms  {2,5} IOPS  ocupado {3,3}%  sync priv {4,5} MB  pagefile {5}%  livre {6} MB  fora: {7} {8} MB/s  [{9}]" -f
-            $now.ToString('HH:mm'), $row.DiscoLatMs, $row.DiscoIops, $row.DiscoOcupMed, $row.SyncPrivMB,
-            $row.PaginacaoUsoPct, $row.RamLivreMB, $row.TopIoProc, $row.TopIoMBs, $row.Config)
+        $travaTxt = if ($row.TravaAmostras) { 'TRAVA {0}/{1}: {2}' -f $row.TravaAmostras, $row.Amostras, $row.TravaProcs } else { 'sem trava' }
+        Write-Host ("{0}  {1}  |  latencia {2,6} ms  {3,5} IOPS  cpu {4,5}% (pico {5})  sync priv {6,5} MB  pagefile {7}%  livre {8} MB  [{9}]" -f
+            $now.ToString('HH:mm'), $travaTxt, $row.DiscoLatMs, $row.DiscoIops, $row.CpuTotalPct, $row.CpuTotalMax, $row.SyncPrivMB,
+            $row.PaginacaoUsoPct, $row.RamLivreMB, $row.Config) -ForegroundColor $(if ($row.TravaAmostras) { 'Red' } else { 'Gray' })
     }
 } finally {
     $mutex.ReleaseMutex()

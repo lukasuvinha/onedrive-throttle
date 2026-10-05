@@ -39,8 +39,8 @@ O monitor descobre sozinho qual ajuste está aplicado (coluna `Config`), então 
 
 | Etapa | O que fazer (como admin) | Depois | Pergunta que responde |
 |---|---|---|---|
-| **0. Baseline** | `.\Set-OneDriveThrottle.ps1 -Action Remove` | logoff/login | Qual a latência do disco e quantos minutos são lentos? Quem causa: OneDrive, antivírus (ESET) ou indexador? |
-| **1. Prioridade** | `.\Set-OneDriveThrottle.ps1 -Action Apply` | logoff/login | A prioridade baixa reduz a latência e a lentidão percebida? |
+| **0. Baseline** | `.\Set-OneDriveThrottle.ps1 -Action Remove` | logoff/login | Quantos minutos por dia alguma janela fica "Não respondendo", e quais programas? Os travamentos coincidem com latência alta do disco? Quem causa: OneDrive, antivírus (ESET) ou indexador? |
+| **1. Prioridade** | `.\Set-OneDriveThrottle.ps1 -Action Apply` | logoff/login | A prioridade baixa reduz os minutos com travamento e a latência? |
 | **2. Ajuste dirigido** | Depende do resultado da etapa 0 (ex.: `-IgnorePatterns` para arquivos que mudam sem parar, indexador, exclusão no antivírus) | logoff/login | O culpado principal foi eliminado? |
 | **Contraprova** *(opcional)* | `-Action Remove` por 1 dia | logoff/login | A melhora foi do ajuste ou de uma semana mais leve? |
 
@@ -77,14 +77,17 @@ O resumo separa cada dia e configuração em três **fases** (coluna `Fase`):
 - **`resto`**: o resto do dia, que reflete o trabalho do usuário. **Compare as etapas por esta linha.**
 - **`sem sync`**: minutos com o motor de sync parado. Mostra quanta carga sobra sem o OneDrive.
 
-**A métrica principal é a latência do disco** (`LatMs` e `LatP95`). Em SSD, "% ocupado" marca 100% mesmo com o disco respondendo rápido, então `Ocup%` e `Em100%` ficam só como referência.
+**O resultado que importa é `MinTrava`**: minutos com alguma janela "Não respondendo", que é o que o usuário sente. Para o disco, a métrica é a **latência** (`LatMs` e `LatP95`). Em SSD, "% ocupado" marca 100% mesmo com o disco respondendo rápido, então `Ocup%` e `Em100%` ficam só no CSV do resumo, como referência.
 
 | Coluna | Significado | O que é bom |
 |---|---|---|
-| `LatMs` / `LatP95` | **Latência do disco** (média / p95, em ms). SSD SATA saudável: < ~5 ms. Dezenas de ms = saturado | **Cair** de uma etapa para a outra |
+| `MinTrava` | **Minutos com alguma janela "Não respondendo"** (vazio = CSV de versão sem essa medição) | **Cair** de uma etapa para a outra |
+| `Trava%` | % das amostras de 5 s com janela travada | Cair |
+| `CpuMed` / `CpuP95` | CPU total da máquina (média / p95 dos minutos) | Referência: CPU alta junto com trava aponta CPU |
+| `LatMs` / `LatP95` | **Latência do disco** (média / p95, em ms). SSD SATA saudável: < ~5 ms. Dezenas de ms = saturado | **Cair** |
 | `MinLentos` | Minutos com latência média ≥ 20 ms (ajustável com `-SlowLatMs`) | Cair |
 | `Iops` | Operações de disco por segundo | Referência (quanto trabalho havia) |
-| `Ocup%` / `Em100%` | % ocupado médio / % do tempo em ≥ 95% | Só referência em SSD |
+| `Ocup%` / `Em100%` | % ocupado médio / % do tempo em ≥ 95% (só no CSV do resumo) | Só referência em SSD |
 | `PagUso%` / `PagUsoMB` | Uso do arquivo de paginação (média / máximo) | Baixo. Subindo com `LivreMB` baixo = **falta de RAM** |
 | `LivreMB` | RAM livre média | Subir |
 | `PgRd` | Page Reads/s: leituras de disco por falta de página. **Inclui arquivos fora do cache**, não é só paginação | Referência. Sozinho não indica falta de RAM |
@@ -94,13 +97,19 @@ O resumo separa cada dia e configuração em três **fases** (coluna `Fase`):
 | `SyncIO`, `OdIO`, `AvIO`, `IdxIO` | O mesmo em MB/s | Idem (não vê listar pastas e ler atributos) |
 | `Ativo` | Se o ajuste estava realmente em vigor no processo | `sim` nas etapas 1 e 2 |
 
-A tabela **"Nos minutos lentos: quem fazia I/O"** é a mais importante da etapa 0. Ela mostra quem estava usando o disco exatamente quando a latência subiu, incluindo processos fora da lista (`TopFora` por MB/s, `TopOps` por operações). Olhe as colunas `*Ops` além das `*IO`: varrer pastas e ler atributos quase não aparece em MB/s.
+A tabela **"Travamentos: quem ficou 'Não respondendo'"** lista os programas que travaram, em quantos minutos e por quanto tempo, aproximadamente. Se for o `explorer`, o OneDrive é suspeito direto: os ícones e o menu de contexto do OneDrive rodam dentro do Explorer.
+
+A tabela **"Travamento x carga"** compara, lado a lado, os minutos **com trava** e **sem trava**: latência, CPU, operações do OneDrive, do antivírus e do indexador, memória. Ela responde se o travamento vem de carga (disco ou CPU cheios) ou de espera (o programa esperando o OneDrive ou a rede, com a máquina folgada).
+
+A tabela **"Nos minutos lentos: quem fazia I/O"** é a mais importante quando os travamentos acompanham a latência. Ela mostra quem estava usando o disco exatamente quando a latência subiu, incluindo processos fora da lista (`TopFora` por MB/s, `TopOps` por operações). Olhe as colunas `*Ops` além das `*IO`: varrer pastas e ler atributos quase não aparece em MB/s.
 
 A tabela **"Memória: top processos"** mostra quem mais ocupa memória privada no dia. Se o arquivo de paginação estiver enchendo, é ela que diz quem consome a RAM. Pode ser o OneDrive ou outro programa.
 
 ## Regras de decisão
 
-- **Na fase `resto`, `LatMs`/`LatP95` e `MinLentos` caíram claramente na etapa 1** → manter a prioridade e aplicar nas outras máquinas.
+- **Na fase `resto`, `MinTrava` caiu claramente na etapa 1** (de preferência junto com `LatMs`/`LatP95`) → manter a prioridade e aplicar nas outras máquinas. Latência menor **sem** queda de `MinTrava` não resolve o problema do usuário.
+- **Na tabela "Travamento x carga", latência e CPU são iguais com e sem trava** → o travamento não é disco nem CPU cheios. O programa espera outra coisa (OneDrive ou rede): prioridade de I/O não vai resolver. Olhe quais programas travam e o Churn (arquivos que o OneDrive mexe sem parar).
+- **Os minutos com trava têm latência ou CPU claramente maiores** → o travamento acompanha a carga; siga a tabela dos minutos lentos para achar quem gera a carga.
 - **Só a fase `inicio` é lenta** → o problema é a sincronização inicial (reinícios do OneDrive, quantidade de itens), não o trabalho do dia.
 - **Nos minutos lentos, o antivírus ou o indexador aparecem com operações comparáveis às do OneDrive** → a etapa 2 ataca esses dois. Também vale se a fase `sem sync` já tiver minutos lentos.
 - **O Churn mostra arquivos temporários ou de trava mudando sem parar** → `-IgnorePatterns` para esses nomes.

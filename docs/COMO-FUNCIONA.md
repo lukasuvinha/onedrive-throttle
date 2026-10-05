@@ -2,7 +2,7 @@
 
 ## O problema
 
-Em PCs Windows com OneDrive sincronizando muitos arquivos, o OneDrive pode deixar a máquina lenta: disco em 100%, RAM alta e CPU ocupada. Fechar o OneDrive "resolve", mas aí o usuário perde o acesso às pastas sincronizadas.
+Em PCs Windows com OneDrive sincronizando muitos arquivos, os programas congelam ("Não respondendo") enquanto esperam o OneDrive, o disco ou a rede. Disco em 100%, RAM alta e CPU ocupada são sintomas que podem ou não estar por trás de cada congelamento; o monitor mede os dois para separar uma coisa da outra. Fechar o OneDrive "resolve", mas aí o usuário perde o acesso às pastas sincronizadas.
 
 A lentidão quase nunca vem só do OneDrive. Cada arquivo que o usuário salva numa pasta sincronizada dispara uma reação em cadeia:
 
@@ -27,6 +27,23 @@ O objetivo do projeto é **medir** de onde vem a carga e **aplicar só o ajuste 
 | `Set-OneDriveThrottle.ps1` | Aplica ou remove os ajustes (`-Action Status / Apply / Remove`) | **Sim** | Sim, para Apply e Remove |
 
 Todos os relatórios vão para a pasta **`reports\`**, ao lado dos scripts.
+
+### O problema real: janelas que congelam
+
+O que o usuário sente não é consumo alto. É **janela congelando**: Excel, Explorer ou o sistema contábil ficam "(Não respondendo)" porque estão esperando uma resposta (do disco, do OneDrive ou da rede). Por isso o monitor mede isso diretamente:
+
+- a cada 5 s, quantas janelas estão "Não respondendo" e de quais processos;
+- por minuto, em quantas das amostras houve janela travada (`TravaAmostras` de `Amostras`), o máximo de janelas travadas ao mesmo tempo (`TravaJanelasMax`) e quais processos travaram (`TravaProcs`, ex.: `EXCEL 3 / explorer 1` = Excel travado em 3 amostras, Explorer em 1);
+- a **CPU total da máquina** (`CpuTotalPct` = média do minuto, `CpuTotalMax` = pico das amostras de 5 s).
+
+O critério é o mesmo do Windows para escrever "(Não respondendo)" no título: a janela não processa mensagens há ~5 s (`IsHungAppWindow`, aplicado às janelas principais listadas pelo `Get-Process`). O monitor **não** usa `Process.Responding` por dois motivos. Ele acusa como travado um app da Loja suspenso, como o Configurações minimizado. E ele pode esperar até 5 s por janela, o que atrasaria a amostragem. A "janela fantasma" esbranquiçada que o Windows desenha por cima da janela travada pertence ao `dwm.exe` e é ignorada, para não contar cada travamento duas vezes.
+
+Uma trava só é detectada depois de ~5 s, então engasgos curtos (1 a 4 s) não aparecem. O monitor pega os congelamentos que o usuário vê com o título "(Não respondendo)".
+
+No `-Report`, **`MinTrava`** (minutos com alguma janela travada) e **`Trava%`** (% das amostras com trava) são as primeiras colunas. Duas tabelas ajudam a achar a causa:
+
+- **"Quem ficou Não respondendo"**: processo, em quantos minutos travou e o tempo aproximado travado.
+- **"Travamento x carga"**: compara os minutos com trava e sem trava, lado a lado (latência, CPU, operações do OneDrive, do antivírus e do indexador, memória). Se a carga sobe junto com a trava, o travamento acompanha o disco ou a CPU cheios. Se a carga fica igual, o programa está travando esperando outra coisa, como uma resposta do OneDrive (abrir ou salvar um arquivo que ele está sincronizando ou baixando) ou da rede.
 
 ### O que o monitor mede, e por que a latência é a métrica principal
 

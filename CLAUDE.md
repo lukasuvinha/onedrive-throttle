@@ -20,7 +20,12 @@ Metas do dono do projeto:
   `-Report` resume por dia/config. Usa contadores brutos (`Win32_PerfRawData_*`) e disco por
   instancia (o `_Total` e media dos discos). Grava tambem IOPS/latencia do disco, operacoes de
   I/O por processo (`*OpsS`), top 5 de memoria privada, uso do arquivo de paginacao
-  (`PaginacaoUsoPct/MB`) e inicio do motor de sync (`SyncInicio`). `-InstallStartup`/`-RemoveStartup`
+  (`PaginacaoUsoPct/MB`), inicio do motor de sync (`SyncInicio`), CPU total (`CpuTotalPct/Max`)
+  e janelas "Nao respondendo" a cada 5 s (`Amostras`, `TravaAmostras`, `TravaJanelasMax`,
+  `TravaProcs`). Travamento = `IsHungAppWindow` na janela principal do `Get-Process`; NAO usar
+  `Process.Responding` (acusa app UWP suspenso e pode bloquear 5 s) e ignorar `dwm` (dono da
+  "janela fantasma" de cada janela travada). Para testar trava: form WinForms +
+  `[Threading.Thread]::Sleep` (o `Start-Sleep` em STA processa mensagens e nao trava). `-InstallStartup`/`-RemoveStartup`
   gerenciam o atalho na pasta Inicializar do usuario.
   Atencao: `AvgDisksecPerTransfer` e `DiskTransfersPersec` brutos sao UInt32 e dao a volta
   (ver `Get-Delta32`); o formatado de latencia vem como inteiro em segundos (sempre 0).
@@ -49,6 +54,10 @@ Metas do dono do projeto:
 3. A latencia alta do disco e so do OneDrive ou tambem do antivirus (ESET `ekrn`/`egui`, o da
    empresa; Defender `MsMpEng` se ativo; grupo `Antivirus*` no Watch) e do indexador
    (`SearchIndexer`) reagindo aos arquivos que o OneDrive mexe?
+
+PROBLEMA REAL (2026-10-05): janela congelando ("Nao respondendo"), nao consumo. O resultado
+principal de cada etapa e `MinTrava` no -Report (fase `resto`); latencia/CPU/memoria servem para
+explicar a causa (tabela "Travamento x carga": carga cheia vs. programa esperando OneDrive/rede).
 
 Notas de medicao (validadas em 2026-10-02):
 - Metrica principal de disco = latencia (`DiscoLatMs`, media e p95). Em SSD o % ocupado fica
