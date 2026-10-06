@@ -25,7 +25,13 @@ Metas do dono do projeto:
   `TravaProcs`). Travamento = `IsHungAppWindow` na janela principal do `Get-Process`; NAO usar
   `Process.Responding` (acusa app UWP suspenso e pode bloquear 5 s) e ignorar `dwm` (dono da
   "janela fantasma" de cada janela travada). Para testar trava: form WinForms +
-  `[Threading.Thread]::Sleep` (o `Start-Sleep` em STA processa mensagens e nao trava). `-InstallStartup`/`-RemoveStartup`
+  `[Threading.Thread]::Sleep` (o `Start-Sleep` em STA processa mensagens e nao trava).
+  Log em `reports\watch-<PC>.log` (`Write-Log`: INICIO/INFO/ERRO/AVISO/FIM/FATAL; erros via
+  `Write-ErrorLog`, com tipo+mensagens internas+linha+pilha e limite de 1 registro a cada 10 min
+  por local/tipo/linha). Regra do laco: nenhuma leitura pode derrubar o monitor - cada leitura
+  de 5 s vai em `Invoke-Safe`, a linha do minuto fica num try/catch que refaz a base, e o WMI tem
+  `-OperationTimeoutSec $WmiTimeout`. Ao mexer no laco, manter isso. Teste de resistencia: copia
+  no scratchpad com falhas injetadas (nao colocar ganchos de teste no script). `-InstallStartup`/`-RemoveStartup`
   gerenciam o atalho na pasta Inicializar do usuario.
   Atencao: `AvgDisksecPerTransfer` e `DiskTransfersPersec` brutos sao UInt32 e dao a volta
   (ver `Get-Delta32`); o formatado de latencia vem como inteiro em segundos (sempre 0).

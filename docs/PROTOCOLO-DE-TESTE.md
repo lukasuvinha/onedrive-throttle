@@ -26,7 +26,7 @@ Objetivo: descobrir **com números** de onde vem a lentidão e se cada ajuste me
    powershell -ExecutionPolicy Bypass -File .\Watch-OneDrive.ps1 -InstallStartup -Label teste
    ```
    Para parar de monitorar: `.\Watch-OneDrive.ps1 -RemoveStartup`.
-4. Faça logoff e login e confira se aparece uma janela do PowerShell minimizada na barra de tarefas. Não feche essa janela.
+4. Faça logoff e login e confira se aparece uma janela do PowerShell minimizada na barra de tarefas. Não feche essa janela. Confira também o log `reports\watch-<PC>.log`: deve ter uma linha `[INICIO]` com a hora do login, e o `cmd=` no fim dela deve mostrar o comando do atalho (`-WindowStyle Minimized -File ...Watch-OneDrive.ps1`).
 5. No primeiro dia, **em horário de trabalho com o usuário usando a máquina**, rode o Churn **só em modo escuta**, sem varredura:
    ```powershell
    powershell -ExecutionPolicy Bypass -File .\Get-OneDriveChurn.ps1 -Hours 0 -WatchMinutes 60
@@ -45,6 +45,11 @@ O monitor descobre sozinho qual ajuste está aplicado (coluna `Config`), então 
 | **Contraprova** *(opcional)* | `-Action Remove` por 1 dia | logoff/login | A melhora foi do ajuste ou de uma semana mais leve? |
 
 Depois de cada logoff/login, confira no console do monitor ou no CSV: `AjusteAtivo = sim`. Se aparecer `nao`, o OneDrive não reiniciou com o ajuste novo.
+
+**Todo dia, uma olhada rápida no log** (`reports\watch-<PC>.log`):
+- uma linha `[INICIO]` por login e, se a máquina ficou ligada, `[INFO]` de hora em hora;
+- `[ERRO]` ocasional não invalida o dia: o monitor pulou só aquela leitura. Muitos erros iguais, ou um `[FATAL]`, precisam ser vistos antes de continuar a etapa;
+- buraco nas linhas `[INFO]` sem um `[FIM]` = o monitor foi fechado ou a máquina desligou. Confira as horas que faltam no CSV.
 
 > **Não há etapa de teto de RAM.** O Windows já reduz sozinho o working set do motor de sync, e o custo real é a memória privada, que o teto não reduz. Detalhes em [COMO-FUNCIONA.md](COMO-FUNCIONA.md#2-teto-de-ram--não-usar).
 
@@ -65,6 +70,7 @@ Depois copie a pasta **`C:\onedrive-throttle\reports`** inteira (pendrive, pasta
 | `onedrive-resumo-<data-hora>.csv` | O resumo gerado pelo `-Report` |
 | `onedrive-<label>-<PC>-<data>.txt` | Os diagnósticos pontuais |
 | `onedrive-churn-<PC>-<data>.txt` | Os arquivos que mudam (do `Get-OneDriveChurn.ps1`) |
+| `watch-<PC>.log` | Log do monitor: início, fim, sinal de vida a cada hora e erros com mensagem completa |
 | `onedrive-watch-<PC>-<data>-anterior-<hora>.csv` | Linhas gravadas por uma versão anterior do monitor no mesmo dia (o `-Report` lê junto) |
 
 Os arquivos de máquinas diferentes não se misturam: o nome do PC faz parte do nome do arquivo.

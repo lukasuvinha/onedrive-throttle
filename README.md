@@ -92,6 +92,8 @@ Uma medição de 3 minutos depende muito do momento. `Watch-OneDrive.ps1` roda o
 .\Watch-OneDrive.ps1 -RemoveStartup                   # para de abrir no login
 ```
 
+Ele também grava um log em `reports\watch-<PC>.log` (início, fim, sinal de vida a cada hora e qualquer erro com a mensagem completa). Erro de leitura não derruba o monitor: só aquela leitura é pulada e registrada.
+
 Por minuto ele grava, primeiro, o que o usuário sente: **janelas "Não respondendo"** (verificadas a cada 5 s: em quantas amostras houve trava e quais programas travaram) e a CPU total da máquina. Depois: latência, IOPS e % ocupado do disco da pasta do OneDrive (amostrado a cada 5 s), uso do arquivo de paginação, RAM livre, Page Reads/s, RAM/disco/CPU do `OneDrive.Sync.Service`, do `OneDrive`, do antivírus (ESET e Defender) e do indexador, e o processo de fora dessa lista que mais fez I/O. O `-Report` usa a **latência** como métrica principal e separa os primeiros 60 min após cada início do OneDrive do resto do dia. Também grava a configuração do IFEO em vigor (`Config`) e se o motor de sync **realmente** está com ela (`AjusteAtivo`, prioridade de I/O e teto de working set lidos do processo) — o IFEO só vale depois que o OneDrive reinicia.
 
 > Usa o % ocupado **por disco**, não o `_Total`: o `_Total` é a média dos discos e esconde um disco em 100% ao lado de um ocioso. Em SSD, olhe também a latência (`DiscoLatMs`): 100% ocupado com latência baixa não é gargalo.

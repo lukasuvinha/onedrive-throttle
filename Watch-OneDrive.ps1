@@ -139,6 +139,65 @@ foreach ($odRoot in @($env:OneDrive, $env:OneDriveCommercial, $env:OneDriveConsu
 
 $ErrorActionPreference = 'Stop'
 $Culture = [Globalization.CultureInfo]::CurrentCulture
+# Tempo maximo de cada consulta WMI: uma consulta travada vira erro (e pula o ciclo) em vez de
+# congelar o monitor.
+$WmiTimeout = 30
+
+# ---------------------------------------------------------------------------
+# Log: reports\watch-<PC>.log (inicio, fim, erros com mensagem completa, sinal de vida)
+# ---------------------------------------------------------------------------
+
+$LogFile = Join-Path $OutDir ("watch-{0}.log" -f $env:COMPUTERNAME)
+
+# Nunca lanca erro: se nem o log puder ser gravado, o monitor segue assim mesmo.
+function Write-Log([string]$Level, [string]$Message) {
+    try {
+        if (-not (Test-Path $OutDir)) { New-Item -ItemType Directory -Path $OutDir -Force | Out-Null }
+        $line = '{0} [{1}] pid={2} {3}' -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $Level, $PID, $Message
+        [IO.File]::AppendAllText($LogFile, $line + [Environment]::NewLine, (New-Object Text.UTF8Encoding $true))
+    } catch {}
+}
+
+# Texto completo de um erro: tipo, mensagem (com as internas), linha do script e pilha.
+function Format-ErrorText($Err) {
+    $parts = @()
+    $ex = $Err.Exception
+    while ($ex) { $parts += '{0}: {1}' -f $ex.GetType().FullName, $ex.Message; $ex = $ex.InnerException }
+    if ($Err.InvocationInfo -and $Err.InvocationInfo.ScriptLineNumber) {
+        $parts += 'linha {0}: {1}' -f $Err.InvocationInfo.ScriptLineNumber, $Err.InvocationInfo.Line.Trim()
+    }
+    if ($Err.ScriptStackTrace) { $parts += 'pilha: ' + ($Err.ScriptStackTrace -replace '\r?\n', ' <- ') }
+    $parts -join ' | '
+}
+
+# Erros repetidos (ex.: o mesmo contador falhando a cada 5 s) nao podem encher o log: cada
+# erro distinto e gravado por completo na 1a vez e depois no maximo a cada 10 min, com a
+# contagem de repeticoes nesse meio tempo.
+$ErrSeen = @{}
+function Write-ErrorLog([string]$Where, $Err) {
+    $script:ErrTotal++
+    $text = Format-ErrorText $Err
+    # Chave sem o texto da mensagem (que pode trazer numeros que mudam a cada vez): local + tipo + linha.
+    $line = if ($Err.InvocationInfo) { $Err.InvocationInfo.ScriptLineNumber } else { 0 }
+    $key  = '{0}|{1}|{2}' -f $Where, $Err.Exception.GetType().FullName, $line
+    $now  = Get-Date
+    $s    = $ErrSeen[$key]
+    if (-not $s) {
+        $ErrSeen[$key] = @{ Last = $now; Count = 0 }
+        Write-Log 'ERRO' ("{0}: {1}" -f $Where, $text)
+    } elseif (($now - $s.Last).TotalMinutes -ge 10) {
+        Write-Log 'ERRO' ("{0} (+{1} repeticao(oes) nao gravadas desde {2:HH:mm}): {3}" -f $Where, $s.Count, $s.Last, $text)
+        $s.Last = $now; $s.Count = 0
+    } else {
+        $s.Count++
+    }
+}
+
+# Erro que escapar de tudo (ex.: falha ao compilar o codigo nativo) fica registrado antes de o script parar.
+trap {
+    Write-Log 'FATAL' ("o script parou: {0}" -f (Format-ErrorText $_))
+    break
+}
 
 # Grupos de processos (nome sem .exe). Instancias repetidas (#1, #2) sao somadas.
 $Groups = [ordered]@{
@@ -243,13 +302,14 @@ function Get-OdDrive {
     if ($uf) { $uf.Substring(0, 2).ToUpper() } else { $env:SystemDrive.ToUpper() }
 }
 
-function Get-DiskRaw { @(Get-CimInstance Win32_PerfRawData_PerfDisk_PhysicalDisk -Filter "Name<>'_Total'") }
-function Get-MemRaw  { Get-CimInstance Win32_PerfRawData_PerfOS_Memory }
+function Get-DiskRaw { @(Get-CimInstance Win32_PerfRawData_PerfDisk_PhysicalDisk -Filter "Name<>'_Total'" -OperationTimeoutSec $WmiTimeout) }
+function Get-MemRaw  { Get-CimInstance Win32_PerfRawData_PerfOS_Memory -OperationTimeoutSec $WmiTimeout }
 
 # CPU total da maquina (_Total de todos os nucleos). PercentProcessorTime bruto conta o tempo
 # OCIOSO em 100 ns (contador invertido): ocupado = 1 - ocioso / tempo decorrido.
-function Get-CpuRaw { Get-CimInstance Win32_PerfRawData_PerfOS_Processor -Filter "Name='_Total'" }
+function Get-CpuRaw { Get-CimInstance Win32_PerfRawData_PerfOS_Processor -Filter "Name='_Total'" -OperationTimeoutSec $WmiTimeout }
 function Get-CpuBusy($a, $b) {
+    if (-not $a -or -not $b) { return $null }   # leitura anterior ou atual falhou
     $dt = [double]$b.Timestamp_Sys100NS - [double]$a.Timestamp_Sys100NS
     if ($dt -le 0) { return $null }
     [math]::Min(100.0, [math]::Max(0.0, 100 * (1 - ([double]$b.PercentProcessorTime - [double]$a.PercentProcessorTime) / $dt)))
@@ -272,7 +332,7 @@ function Get-HungWindows {
 # _Base = tamanho do arquivo em paginas. Arquivo de paginacao cheio + pouca RAM livre =
 # falta de RAM de verdade (Page Reads/s sozinho nao diz isso).
 function Get-PagingFile {
-    $p = Get-CimInstance Win32_PerfRawData_PerfOS_PagingFile -Filter "Name='_Total'" -ErrorAction SilentlyContinue
+    $p = Get-CimInstance Win32_PerfRawData_PerfOS_PagingFile -Filter "Name='_Total'" -OperationTimeoutSec $WmiTimeout -ErrorAction SilentlyContinue
     if (-not $p -or -not [double]$p.PercentUsage_Base) { return $null }
     [pscustomobject]@{
         Pct = 100 * [double]$p.PercentUsage / [double]$p.PercentUsage_Base
@@ -283,7 +343,7 @@ function Get-PagingFile {
 # Um objeto por PID. Nao usa o nome da instancia como chave (OneDrive#1 muda quando processos saem).
 function Get-ProcRaw {
     $t = @{}
-    foreach ($p in Get-CimInstance Win32_PerfRawData_PerfProc_Process) {
+    foreach ($p in Get-CimInstance Win32_PerfRawData_PerfProc_Process -OperationTimeoutSec $WmiTimeout) {
         if ($p.Name -eq '_Total' -or $p.Name -eq 'Idle') { continue }
         $t[[int]$p.IDProcess] = $p
     }
@@ -609,24 +669,47 @@ if ($InstallStartup) {
 
 $created = $false
 $mutex = New-Object System.Threading.Mutex($true, 'Local\onedrive-throttle-watch', [ref]$created)
-if (-not $created) { Write-Warning 'Ja existe um Watch-OneDrive rodando nesta sessao.'; return }
+if (-not $created) {
+    Write-Log 'AVISO' 'outro Watch-OneDrive ja esta rodando nesta sessao; esta instancia saiu sem medir'
+    Write-Warning 'Ja existe um Watch-OneDrive rodando nesta sessao.'
+    return
+}
 
+# Executa uma leitura; se falhar, registra no log e devolve $null (o ciclo segue sem ela).
+function Invoke-Safe([string]$Where, [scriptblock]$Block) {
+    try { & $Block } catch { Write-ErrorLog $Where $_; $null }
+}
+
+$ErrTotal    = 0
+$rowsWritten = 0
+$endReason   = 'interrompido (Ctrl+C, janela fechada, logoff ou desligamento)'
+$startedAt   = Get-Date
 try {
     if (-not (Test-Path $OutDir)) { New-Item -ItemType Directory -Path $OutDir -Force | Out-Null }
     try { (Get-Process -Id $PID).PriorityClass = 'BelowNormal' } catch {}   # o proprio monitor nao disputa CPU
 
-    $ncpu    = [int](Get-CimInstance Win32_ComputerSystem).NumberOfLogicalProcessors
+    # Linha de comando real do processo: mostra se veio do atalho de inicializacao.
+    $cmdLine = Invoke-Safe 'linha de comando' { (Get-CimInstance Win32_Process -Filter "ProcessId=$PID" -OperationTimeoutSec $WmiTimeout).CommandLine }
     $odDrive = Get-OdDrive
+    Write-Log 'INICIO' ("usuario={0} ps={1} intervalo={2}s amostra={3}s rotulo='{4}' disco={5} pasta={6} script={7:yyyy-MM-dd HH:mm} cmd={8}" -f
+        $env:USERNAME, $PSVersionTable.PSVersion, $Interval, $DiskInterval, $Label, $odDrive, $OutDir,
+        (Get-Item $MyInvocation.MyCommand.Definition).LastWriteTime, $cmdLine)
+
+    $ncpu = Invoke-Safe 'numero de CPUs' { [int](Get-CimInstance Win32_ComputerSystem -OperationTimeoutSec $WmiTimeout).NumberOfLogicalProcessors }
+    if (-not $ncpu) { $ncpu = [Environment]::ProcessorCount }
     $known   = @{}
     foreach ($k in $Groups.Keys) { foreach ($n in $Groups[$k]) { $known[$n] = $k } }
 
     Write-Host ("Monitor iniciado: linha a cada {0} s, disco {1} a cada {2} s. CSV em {3}" -f $Interval, $odDrive, $DiskInterval, $OutDir) -ForegroundColor Yellow
+    Write-Host ("Log: {0}" -f $LogFile)
     Write-Host 'Pode minimizar esta janela. Ctrl+C para parar (o que ja foi gravado fica).'
 
-    $prevProc = Get-ProcRaw
-    $prevMem  = Get-MemRaw
-    $prevDisk = Get-DiskRaw
-    $prevCpu  = Get-CpuRaw
+    # Leituras de base. Se alguma falhar fica $null: o primeiro ciclo completo vira a nova base.
+    $prevProc = Invoke-Safe 'leitura inicial de processos' { Get-ProcRaw }
+    $prevMem  = Invoke-Safe 'leitura inicial de memoria'   { Get-MemRaw }
+    $prevDisk = Invoke-Safe 'leitura inicial de disco'     { Get-DiskRaw }
+    $prevCpu  = Invoke-Safe 'leitura inicial de CPU'       { Get-CpuRaw }
+    $nextBeat = (Get-Date).AddHours(1)
     $win      = New-Object System.Collections.Generic.List[object]
     $pending  = New-Object System.Collections.Generic.List[object]
     $stopAt   = if ($DurationMinutes -gt 0) { (Get-Date).AddMinutes($DurationMinutes) } else { [datetime]::MaxValue }
@@ -635,39 +718,64 @@ try {
     while ((Get-Date) -lt $stopAt) {
         Start-Sleep -Seconds $DiskInterval
 
-        # --- Disco, a cada DiskInterval ---
-        $curDisk = Get-DiskRaw
-        $busy = @(Get-DiskBusy $prevDisk $curDisk)
-        $prevDisk = $curDisk
-        $od = $busy | Where-Object { ($_.Name -split ' ') -contains $odDrive } | Select-Object -First 1
+        # Sinal de vida no log a cada hora: mostra ate quando o monitor rodou se ele for morto.
+        if ((Get-Date) -ge $nextBeat) {
+            Write-Log 'INFO' ("rodando ha {0:N1} h: {1} linha(s) gravada(s), {2} erro(s)" -f ((Get-Date) - $startedAt).TotalHours, $rowsWritten, $ErrTotal)
+            $nextBeat = (Get-Date).AddHours(1)
+        }
 
-        # --- CPU total e janelas "Nao respondendo", na mesma cadencia ---
-        $curCpu = Get-CpuRaw
+        # --- Amostra a cada DiskInterval. Cada leitura e independente: a que falhar fica vazia
+        #     nesta amostra (e vai para o log); as outras continuam valendo. ---
+        $curDisk = Invoke-Safe 'leitura de disco' { Get-DiskRaw }
+        $busy = @()
+        if ($curDisk) {
+            $busy = @(Invoke-Safe 'calculo de disco' { Get-DiskBusy $prevDisk $curDisk })
+            $prevDisk = $curDisk
+        }
+        $od = $busy | Where-Object { $_ -and ($_.Name -split ' ') -contains $odDrive } | Select-Object -First 1
+
+        $curCpu = Invoke-Safe 'leitura de CPU' { Get-CpuRaw }
         $cpu = Get-CpuBusy $prevCpu $curCpu
-        $prevCpu = $curCpu
-        $hung = @(Get-HungWindows)
+        if ($curCpu) { $prevCpu = $curCpu }
+
+        # Janelas travadas: a medida principal. Se a leitura falhar, a amostra nao conta para
+        # travamento (Hung = $null), em vez de contar como "sem trava".
+        $hungOk = $true
+        $hung = Invoke-Safe 'janelas Nao respondendo' { , @(Get-HungWindows) }
+        if ($null -eq $hung) { $hungOk = $false; $hung = @() }
 
         $win.Add([pscustomobject]@{
-            Od    = if ($od) { $od.Busy } else { $null }
-            Queue = if ($od) { $od.Queue } else { $null }
-            Iops  = if ($od) { $od.Iops } else { $null }
-            LatMs = if ($od) { $od.LatMs } else { $null }
-            Any   = if ($busy) { ($busy | Measure-Object Busy -Maximum).Maximum } else { $null }
-            Cpu   = $cpu
-            Hung  = $hung
+            Od     = if ($od) { $od.Busy } else { $null }
+            Queue  = if ($od) { $od.Queue } else { $null }
+            Iops   = if ($od) { $od.Iops } else { $null }
+            LatMs  = if ($od) { $od.LatMs } else { $null }
+            Any    = if ($busy) { ($busy | Measure-Object Busy -Maximum).Maximum } else { $null }
+            Cpu    = $cpu
+            Hung   = $hung
+            HungOk = $hungOk
         })
 
         if ((Get-Date) -lt $next) { continue }
         $now  = Get-Date
         $next = $now.AddSeconds($Interval)
 
+        # --- Linha do minuto. Qualquer erro aqui pula SO esta linha: vai para o log, a base
+        #     de comparacao e refeita e o monitor segue. ---
+        try {
+
         # --- Processos e memoria, a cada Interval ---
         $curProc = Get-ProcRaw
         $curMem  = Get-MemRaw
+        if (-not $prevProc -or -not $prevMem) {
+            # Base inicial falhou: esta leitura vira a base, a proxima linha ja sai normal.
+            $prevProc = $curProc; $prevMem = $curMem; $win.Clear()
+            continue
+        }
         $secs = ([double]$curMem.Timestamp_PerfTime - [double]$prevMem.Timestamp_PerfTime) / [double]$curMem.Frequency_PerfTime
 
         # Depois de suspender/hibernar o intervalo fica enorme e a media nao significa nada: descarta.
         if ($secs -le 0 -or $secs -gt 2 * $Interval) {
+            Write-Log 'INFO' ("intervalo de {0:N0} s (suspensao/hibernacao?): linha descartada, base refeita" -f $secs)
             $prevProc = $curProc; $prevMem = $curMem; $win.Clear()
             continue
         }
@@ -750,8 +858,10 @@ try {
 
         # Travamentos: em quantas amostras havia janela "Nao respondendo" e quais processos.
         # TravaProcs = "nome amostras / nome amostras", do que travou mais vezes no minuto.
-        $hungW     = @($win | Where-Object { $_.Hung.Count -gt 0 })
-        $hungMax   = if ($win.Count) { ($win | ForEach-Object { $_.Hung.Count } | Measure-Object -Maximum).Maximum } else { 0 }
+        # So conta amostras em que a leitura de janelas funcionou (HungOk).
+        $hungOkW   = @($win | Where-Object { $_.HungOk })
+        $hungW     = @($hungOkW | Where-Object { $_.Hung.Count -gt 0 })
+        $hungMax   = if ($hungOkW.Count) { ($hungOkW | ForEach-Object { $_.Hung.Count } | Measure-Object -Maximum).Maximum } else { 0 }
         $hungProcs = (@($hungW | ForEach-Object { $_.Hung | Select-Object -Unique }) | Group-Object |
             Sort-Object Count -Descending | ForEach-Object { '{0} {1}' -f $_.Name, $_.Count }) -join ' / '
         $dIops = if ($odW) { ($odW | Measure-Object Iops -Average).Average } else { $null }
@@ -771,7 +881,7 @@ try {
             SyncPid         = if ($sp) { $sp.Id } else { $null }
             SyncInicio      = $syncStart
             # Janelas "Nao respondendo" (o problema que o usuario sente).
-            Amostras        = $win.Count
+            Amostras        = $hungOkW.Count
             TravaAmostras   = $hungW.Count
             TravaJanelasMax = [int]$hungMax
             TravaProcs      = $hungProcs
@@ -836,17 +946,40 @@ try {
                 }
                 $day.Group | Export-Csv -Path $file -Append -NoTypeInformation -UseCulture -Encoding UTF8
             }
+            $rowsWritten += $pending.Count
             $pending.Clear()
         } catch {
+            Write-ErrorLog ("gravacao do CSV ({0} linha(s) pendentes; arquivo aberto no Excel?)" -f $pending.Count) $_
             Write-Warning ("Nao gravei agora ({0} linha(s) pendentes - CSV aberto no Excel?): {1}" -f $pending.Count, $_.Exception.Message)
+            # Excel aberto o dia todo nao pode fazer as linhas pendentes crescerem sem limite.
+            if ($pending.Count -gt 1440) {
+                Write-Log 'ERRO' ("{0} linhas pendentes: descartando as mais antigas" -f $pending.Count)
+                $pending.RemoveRange(0, $pending.Count - 1440)
+            }
         }
 
         $travaTxt = if ($row.TravaAmostras) { 'TRAVA {0}/{1}: {2}' -f $row.TravaAmostras, $row.Amostras, $row.TravaProcs } else { 'sem trava' }
         Write-Host ("{0}  {1}  |  latencia {2,6} ms  {3,5} IOPS  cpu {4,5}% (pico {5})  sync priv {6,5} MB  pagefile {7}%  livre {8} MB  [{9}]" -f
             $now.ToString('HH:mm'), $travaTxt, $row.DiscoLatMs, $row.DiscoIops, $row.CpuTotalPct, $row.CpuTotalMax, $row.SyncPrivMB,
             $row.PaginacaoUsoPct, $row.RamLivreMB, $row.Config) -ForegroundColor $(if ($row.TravaAmostras) { 'Red' } else { 'Gray' })
+
+        } catch {
+            # Linha do minuto perdida, monitor vivo: refaz a base para a proxima linha sair certa.
+            Write-ErrorLog 'linha do minuto' $_
+            Write-Warning ("Erro nesta linha (gravado no log, o monitor continua): {0}" -f $_.Exception.Message)
+            $win.Clear()
+            $p = Invoke-Safe 'refazer base de processos' { Get-ProcRaw }; if ($p) { $prevProc = $p }
+            $m = Invoke-Safe 'refazer base de memoria'   { Get-MemRaw };  if ($m) { $prevMem = $m }
+        }
     }
+    $endReason = 'tempo pedido (-DurationMinutes) concluido'
+} catch {
+    # So chega aqui erro fora do laco (preparacao). O laco em si nao deixa erro escapar.
+    $endReason = 'erro fatal: ' + (Format-ErrorText $_)
+    Write-Log 'FATAL' $endReason
+    Write-Host ("ERRO FATAL, monitor parado (detalhes em {0}): {1}" -f $LogFile, $_.Exception.Message) -ForegroundColor Red
 } finally {
-    $mutex.ReleaseMutex()
+    Write-Log 'FIM' ("motivo: {0} | rodou {1:N0} min, {2} linha(s) gravada(s), {3} erro(s)" -f $endReason, ((Get-Date) - $startedAt).TotalMinutes, $rowsWritten, $ErrTotal)
+    try { $mutex.ReleaseMutex() } catch {}
     $mutex.Dispose()
 }

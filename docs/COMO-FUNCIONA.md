@@ -45,6 +45,25 @@ No `-Report`, **`MinTrava`** (minutos com alguma janela travada) e **`Trava%`** 
 - **"Quem ficou Não respondendo"**: processo, em quantos minutos travou e o tempo aproximado travado.
 - **"Travamento x carga"**: compara os minutos com trava e sem trava, lado a lado (latência, CPU, operações do OneDrive, do antivírus e do indexador, memória). Se a carga sobe junto com a trava, o travamento acompanha o disco ou a CPU cheios. Se a carga fica igual, o programa está travando esperando outra coisa, como uma resposta do OneDrive (abrir ou salvar um arquivo que ele está sincronizando ou baixando) ou da rede.
 
+### Log e resistência a erros
+
+O monitor fica o dia todo minimizado numa máquina de usuário, onde ninguém olha a janela. Por isso ele grava um log em **`reports\watch-<PC>.log`**:
+
+| Linha | Quando |
+|---|---|
+| `[INICIO]` | Ao abrir: usuário, versão do PowerShell, intervalo, rótulo, disco medido, data do script e a **linha de comando real**, que mostra se veio do atalho de inicialização |
+| `[INFO]` | Uma vez por hora (sinal de vida: linhas gravadas e erros até ali) e quando um intervalo é descartado por suspensão ou hibernação |
+| `[ERRO]` | Qualquer leitura ou gravação que falhou, com a **mensagem completa**: tipo do erro, mensagens internas, linha do script e pilha de chamadas |
+| `[AVISO]` | O atalho foi aberto com um monitor já rodando; a segunda instância sai sem medir |
+| `[FIM]` | Ao terminar: motivo, minutos rodados, linhas gravadas e total de erros |
+| `[FATAL]` | Erro fora do laço (ex.: na preparação) que impediu o monitor de rodar |
+
+**O laço não para por erro.** Cada leitura de 5 s (disco, CPU, janelas) é independente: a que falhar fica vazia naquela amostra e vai para o log, e as outras continuam. A detecção de travamento, por exemplo, segue mesmo se o contador de disco falhar. Uma amostra em que a leitura de janelas falhou não conta como "sem trava": fica fora de `Amostras`. Se a linha do minuto inteira falhar, só ela se perde, a base de comparação é refeita e a próxima linha sai normal. Cada consulta WMI tem limite de 30 s, então uma consulta travada vira erro em vez de congelar o monitor.
+
+Para o log não encher, um erro que se repete (o mesmo local, tipo e linha) é gravado completo na primeira vez e depois no máximo a cada 10 min, com a contagem de repetições. Se o CSV ficar aberto no Excel, as linhas esperam na memória (até 1 dia) e são gravadas quando o arquivo for fechado.
+
+Fechar a janela, fazer logoff ou desligar mata o processo sem chance de gravar o `[FIM]`. Nesses casos, a última linha `[INFO]` de hora em hora (ou a última linha do CSV) mostra até quando ele rodou.
+
 ### O que o monitor mede, e por que a latência é a métrica principal
 
 Em SSD, "% ocupado" só quer dizer que havia pelo menos uma operação pendente. Na validação, o disco ficou "100% ocupado" na maior parte da manhã com latência mediana de ~5 ms, ou seja, sem gargalo real. Por isso a **métrica principal é a latência** do disco da pasta do OneDrive:
