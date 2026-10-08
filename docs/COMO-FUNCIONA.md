@@ -22,7 +22,7 @@ O objetivo do projeto é **medir** de onde vem a carga e **aplicar só o ajuste 
 | Script | O que faz | Altera o sistema? | Precisa de admin? |
 |---|---|---|---|
 | `Get-OneDriveDiag.ps1` | Foto da máquina: hardware, pastas sincronizadas, quantidade de itens e 3 min de medição | Não | Não |
-| `Watch-OneDrive.ps1` | Monitor contínuo: 1 linha por minuto num CSV diário. `-Report` resume os dias. `-InstallStartup` / `-RemoveStartup` cria ou apaga o atalho na pasta Inicializar. `-CollectDir` copia os relatórios de hora em hora para uma pasta central | Não (o atalho é só um arquivo na pasta Inicializar do usuário) | Não |
+| `Watch-OneDrive.ps1` | Monitor contínuo: 1 linha por minuto num CSV diário. `-Report` resume os dias. `-InstallTask` / `-RemoveTask` registra ou remove a tarefa agendada que mantém o monitor rodando oculto (`-InstallStartup` / `-RemoveStartup`: atalho antigo na pasta Inicializar). `-CollectDir` copia os relatórios de hora em hora para uma pasta central | Só a tarefa agendada (`-InstallTask`); a medição não altera nada | Só para `-InstallTask` / `-RemoveTask` |
 | `Get-OneDriveChurn.ps1` | Mostra quais arquivos das pastas sincronizadas mudam, por categoria (temporário, trava do Office, banco...), extensão e pasta. Varredura das últimas N horas e/ou escuta ao vivo (`-WatchMinutes`). Lê só nome, tamanho, data e atributos; nunca abre nem baixa arquivos | Não | Não |
 | `Set-OneDriveThrottle.ps1` | Aplica ou remove os ajustes (`-Action Status / Apply / Remove`) | **Sim** | Sim, para Apply e Remove |
 
@@ -47,14 +47,14 @@ No `-Report`, **`MinTrava`** (minutos com alguma janela travada) e **`Trava%`** 
 
 ### Log e resistência a erros
 
-O monitor fica o dia todo minimizado numa máquina de usuário, onde ninguém olha a janela. Por isso ele grava um log em **`reports\watch-<PC>.log`**:
+O monitor fica o dia todo oculto numa máquina de usuário, sem janela para ninguém olhar. Por isso ele grava um log em **`reports\watch-<PC>.log`**:
 
 | Linha | Quando |
 |---|---|
-| `[INICIO]` | Ao abrir: usuário, versão do PowerShell, intervalo, rótulo, disco medido, data do script e a **linha de comando real**, que mostra se veio do atalho de inicialização |
+| `[INICIO]` | Ao abrir: usuário, versão do PowerShell, intervalo, rótulo, coleta, disco medido, data do script e a **linha de comando real**, que mostra se veio da tarefa agendada (`-WindowStyle Hidden`) ou do atalho |
 | `[INFO]` | Uma vez por hora (sinal de vida: linhas gravadas e erros até ali) e quando um intervalo é descartado por suspensão ou hibernação |
 | `[ERRO]` | Qualquer leitura ou gravação que falhou, com a **mensagem completa**: tipo do erro, mensagens internas, linha do script e pilha de chamadas |
-| `[AVISO]` | O atalho foi aberto com um monitor já rodando; a segunda instância sai sem medir |
+| `[AVISO]` | O monitor foi aberto com outro já rodando na sessão: a segunda instância sai sem medir. Gravado **uma vez por dia** (a tarefa tenta a cada 15 min; a data fica em `reports\watch-<PC>.duplicado`). Também usado pela coleta central |
 | `[FIM]` | Ao terminar: motivo, minutos rodados, linhas gravadas e total de erros |
 | `[FATAL]` | Erro fora do laço (ex.: na preparação) que impediu o monitor de rodar |
 
@@ -71,7 +71,19 @@ Para não precisar ir até cada máquina buscar os relatórios, o monitor pode *
 - **O quê:** `onedrive-watch-*.csv`, `onedrive-resumo-*.csv`, os relatórios do `Get-OneDriveDiag.ps1` e o `watch-<PC>.log`. **Nunca os do `Get-OneDriveChurn.ps1`**, porque têm nomes de arquivos de clientes. O diagnóstico é reconhecido pela primeira linha do relatório (`=== onedrive-diag |`), não pelo nome: o Churn usa o mesmo formato de nome e aceita `-Label` livre.
 - **Se der errado:** se a pasta de coleta não existir, o monitor não a cria nem cria as pastas acima dela, porque isso indicaria caminho errado ou biblioteca ainda não sincronizada. Ele registra `[AVISO]` uma vez (e `[INFO]` quando voltar a funcionar) e segue só com o local. O mesmo vale se o OneDrive não estiver configurado. Uma cópia que falhar vai para o log como `[ERRO]` e é tentada de novo na hora seguinte. A coleta nunca derruba o monitor.
 
-Fechar a janela, fazer logoff ou desligar mata o processo sem chance de gravar o `[FIM]`. Nesses casos, a última linha `[INFO]` de hora em hora (ou a última linha do CSV) mostra até quando ele rodou.
+Encerrar o processo, fazer logoff ou desligar mata o monitor sem chance de gravar o `[FIM]`. Nesses casos, a última linha `[INFO]` de hora em hora (ou a última linha do CSV) mostra até quando ele rodou.
+
+### Rodar oculto e voltar sozinho (`-InstallTask`)
+
+O atalho na pasta Inicializar tinha dois problemas: abria uma janela do PowerShell (que o usuário podia fechar sem querer) e, uma vez fechado, o monitor só voltava no próximo login. O `-InstallTask` (como admin) troca o atalho por uma tarefa agendada, `onedrive-throttle-watch`:
+
+- **Quem:** o grupo Usuários (pelo SID `S-1-5-32-545`, porque o nome é traduzido no Windows pt-BR). A tarefa roda na sessão interativa de quem está logado, sem senha guardada. O Agendador mostra o tipo de logon como "Group", que é o equivalente de "Interativo" para um grupo. **Nunca como SYSTEM:** o SYSTEM não vê as janelas do usuário (a detecção de "Não respondendo" daria sempre zero), nem as variáveis do OneDrive dele.
+- **Quando:** no logon de qualquer usuário e de novo a cada 15 min, sem prazo para acabar e sem limite de tempo de execução. Em notebook, roda também na bateria.
+- **Como fica oculto:** a ação é `wscript.exe //B Watch-OneDrive.vbs`. O lançador é gerado pelo `-InstallTask` na pasta do projeto, com o `-Label` e o `-CollectDir` dentro, e abre o `powershell.exe` com janela 0 (oculta desde o início). Chamar o `powershell.exe -WindowStyle Hidden` direto pela tarefa faria a janela piscar no login. O `.vbs` é gravado em UTF-16, para caminhos com acento, e fica fora do git porque contém o caminho real da coleta.
+- **Sem duplicata:** o `wscript` sai assim que abre o monitor, então a tarefa termina na hora. A opção "não iniciar nova instância" fica ligada, mas quem impede dois monitores na mesma sessão é o mutex do script. A cada 15 min, a instância nova vê o mutex e sai sem medir, e o log só registra isso uma vez por dia.
+- **Limite:** a repetição de 15 min começa no logon. Logo depois de instalar, a sessão já aberta só ganha o monitor com logoff/login ou `Start-ScheduledTask onedrive-throttle-watch`.
+
+O `-RemoveTask` apaga a tarefa e o `.vbs`, mas não mata o monitor em execução. O `-InstallTask` apaga o atalho antigo (`Watch-OneDrive.lnk`) da pasta Inicializar de todos os perfis.
 
 ### O que o monitor mede, e por que a latência é a métrica principal
 

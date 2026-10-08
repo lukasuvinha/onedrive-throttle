@@ -79,6 +79,19 @@
     Se a pasta nao existir ou o OneDrive nao estiver configurado, segue so com o local e
     registra AVISO no log (nao cria a pasta; cria so a subpasta da maquina).
 
+.PARAMETER InstallTask
+    (Exige admin.) Registra a tarefa agendada "onedrive-throttle-watch": roda na sessao de
+    qualquer usuario que fizer logon (grupo Usuarios, nunca SYSTEM - precisa ver as janelas e
+    o OneDrive do usuario), no logon e de novo a cada 15 min, sem limite de duracao. Se o
+    monitor for encerrado, volta em ate 15 min; se ja estiver rodando, a nova instancia sai
+    sem medir (mutex). A acao e wscript.exe com o lancador Watch-OneDrive.vbs, gerado na pasta
+    do projeto, que abre o powershell.exe oculto (nenhuma janela no login) repassando -Label e
+    -CollectDir. Remove o atalho antigo da pasta Inicializar (-InstallStartup), se existir.
+
+.PARAMETER RemoveTask
+    (Exige admin.) Remove a tarefa e o lancador .vbs. Nao encerra o monitor que ja esta
+    rodando (ele para no logoff).
+
 .PARAMETER StartMinutes
     Com -Report: quantos minutos apos cada inicio do OneDrive contam como
     fase "inicio" (padrao 60).
@@ -90,6 +103,10 @@
 .EXAMPLE
     .\Watch-OneDrive.ps1 -Report -FromHour 8 -ToHour 18
     Resumo dos dias medidos, so no horario de expediente.
+
+.EXAMPLE
+    .\Watch-OneDrive.ps1 -InstallTask -Label base -CollectDir 'Pasta\Subpasta'
+    (Como admin.) Monitor oculto em todo logon, reiniciado se for encerrado.
 #>
 
 [CmdletBinding()]
@@ -109,6 +126,10 @@ param(
     # Cria / remove o atalho na pasta Inicializar do usuario (shell:startup).
     [switch]$InstallStartup,
     [switch]$RemoveStartup,
+
+    # Registra / remove a tarefa agendada (exige admin; ver ajuda). Substitui o atalho.
+    [switch]$InstallTask,
+    [switch]$RemoveTask,
 
     [ValidateRange(0, 23)]
     [int]$FromHour = 0,
@@ -679,6 +700,76 @@ if ($InstallStartup) {
     return
 }
 
+# Tarefa agendada (-InstallTask): monitor oculto em todo logon, relancado a cada 15 min se tiver
+# sido encerrado. Roda na sessao do usuario (grupo Usuarios), nunca como SYSTEM: o monitor precisa
+# ver as janelas e o OneDrive de quem esta logado.
+$TaskName = 'onedrive-throttle-watch'
+$Launcher = Join-Path (Split-Path -Parent $PSCommandPath) 'Watch-OneDrive.vbs'
+if ($InstallTask -or $RemoveTask) {
+    $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
+        [Security.Principal.WindowsBuiltInRole]::Administrator)
+    if (-not $isAdmin) { Write-Host '-InstallTask/-RemoveTask exigem o PowerShell aberto como administrador.' -ForegroundColor Red; return }
+}
+if ($RemoveTask) {
+    if (Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue) {
+        Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false
+        Write-Host "Tarefa removida: $TaskName" -ForegroundColor Green
+    } else { Write-Host "Nao havia a tarefa $TaskName." }
+    if (Test-Path -LiteralPath $Launcher) { Remove-Item -LiteralPath $Launcher; Write-Host "Lancador removido: $Launcher" }
+    Write-Host 'O monitor que ja esta rodando segue ate o logoff (ou encerre o powershell.exe do Watch-OneDrive).'
+    return
+}
+if ($InstallTask) {
+    # O lancador repassa os parametros entre aspas: aspas dentro deles quebrariam a linha de comando.
+    if ("$Label$CollectDir".Contains('"')) { Write-Host '-Label e -CollectDir nao podem ter aspas (").' -ForegroundColor Red; return }
+    $psExe = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+    $cmd   = '"{0}" -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "{1}"' -f $psExe, $PSCommandPath
+    if ($Label)      { $cmd += ' -Label "{0}"' -f $Label }
+    # Sem barra no fim: \" no fim de um argumento escaparia a aspa na linha de comando.
+    if ($CollectDir) { $cmd += ' -CollectDir "{0}"' -f $CollectDir.TrimEnd('\') }
+    # Run(..., 0, False): janela oculta desde o inicio e o wscript sai na hora (a tarefa termina e o
+    # monitor segue sozinho). Quem evita monitor duplicado e o mutex do script, por sessao.
+    $vbs = @(
+        "' Gerado por Watch-OneDrive.ps1 -InstallTask em {0:yyyy-MM-dd HH:mm}. Para mudar, rode -InstallTask de novo." -f (Get-Date)
+        "' Abre o monitor sem janela (estilo 0). Removido por -RemoveTask."
+        'CreateObject("WScript.Shell").Run "{0}", 0, False' -f $cmd.Replace('"', '""')
+    ) -join "`r`n"
+    # UTF-16 com BOM: assim o wscript le certo caminhos com acento (a pasta de coleta pode ter).
+    [IO.File]::WriteAllText($Launcher, $vbs + "`r`n", [Text.Encoding]::Unicode)
+
+    $action = New-ScheduledTaskAction -Execute (Join-Path $env:SystemRoot 'System32\wscript.exe') `
+        -Argument ('//B //NoLogo "{0}"' -f $Launcher) -WorkingDirectory (Split-Path -Parent $PSCommandPath)
+    # Logon de qualquer usuario, repetindo a cada 15 min sem fim (Duration vazio = indefinido).
+    $trigger = New-ScheduledTaskTrigger -AtLogOn
+    $trigger.Repetition = New-CimInstance -ClientOnly -Namespace Root/Microsoft/Windows/TaskScheduler `
+        -ClassName MSFT_TaskRepetitionPattern -Property @{ Interval = 'PT15M'; StopAtDurationEnd = $false }
+    # Grupo Usuarios pelo SID (o nome e traduzido no pt-BR). Principal de grupo = roda so na sessao
+    # interativa de quem esta logado; o Agendador mostra o LogonType como "Group".
+    $principal = New-ScheduledTaskPrincipal -GroupId 'S-1-5-32-545' -RunLevel Limited
+    $settings  = New-ScheduledTaskSettingsSet -MultipleInstances IgnoreNew -ExecutionTimeLimit ([TimeSpan]::Zero) `
+        -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable
+    Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger -Principal $principal -Settings $settings `
+        -Description 'Monitor do OneDrive (onedrive-throttle): Watch-OneDrive.ps1 oculto na sessao do usuario.' -Force | Out-Null
+    Write-Host "Tarefa registrada: $TaskName" -ForegroundColor Green
+    Write-Host "  wscript.exe -> $Launcher"
+    Write-Host "  $cmd"
+
+    # O atalho antigo (-InstallStartup) abriria um 2o caminho de inicio, com janela: remove de todos
+    # os perfis (o admin que instala pode nao ser o usuario que usa a maquina).
+    $profiles = Split-Path -Parent $env:PUBLIC
+    $old = @($StartupLnk) + @(Get-ChildItem -LiteralPath $profiles -Directory -Force -ErrorAction SilentlyContinue | ForEach-Object {
+        Join-Path $_.FullName 'AppData\Roaming\Microsoft\Windows\Start Menu\Programs\Startup\Watch-OneDrive.lnk' })
+    foreach ($l in ($old | Sort-Object -Unique)) {
+        if (Test-Path -LiteralPath $l) {
+            try { Remove-Item -LiteralPath $l -Force; Write-Host "Atalho antigo removido: $l" }
+            catch { Write-Host ("Nao consegui remover {0}: {1}" -f $l, $_.Exception.Message) -ForegroundColor Yellow }
+        }
+    }
+    Write-Host 'O monitor abre oculto no proximo logon (e volta em ate 15 min se for encerrado).'
+    Write-Host "Para abrir agora nesta sessao: Start-ScheduledTask $TaskName. Para remover: -RemoveTask"
+    return
+}
+
 # ---------------------------------------------------------------------------
 # Monitor
 # ---------------------------------------------------------------------------
@@ -686,7 +777,15 @@ if ($InstallStartup) {
 $created = $false
 $mutex = New-Object System.Threading.Mutex($true, 'Local\onedrive-throttle-watch', [ref]$created)
 if (-not $created) {
-    Write-Log 'AVISO' 'outro Watch-OneDrive ja esta rodando nesta sessao; esta instancia saiu sem medir'
+    # A tarefa agendada tenta abrir o monitor a cada 15 min: a instancia duplicada sai em silencio
+    # e so registra no log 1 vez por dia (a data fica num arquivo marcador em reports\).
+    $dupMark = Join-Path $OutDir ("watch-{0}.duplicado" -f $env:COMPUTERNAME)
+    $today   = Get-Date -Format 'yyyy-MM-dd'
+    $last    = try { [IO.File]::ReadAllText($dupMark).Trim() } catch { '' }
+    if ($last -ne $today) {
+        Write-Log 'AVISO' 'outro Watch-OneDrive ja esta rodando nesta sessao; esta instancia saiu sem medir (registrado 1 vez por dia)'
+        try { [IO.File]::WriteAllText($dupMark, $today) } catch {}
+    }
     Write-Warning 'Ja existe um Watch-OneDrive rodando nesta sessao.'
     return
 }

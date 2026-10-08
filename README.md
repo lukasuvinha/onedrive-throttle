@@ -86,12 +86,16 @@ Compare principalmente: *Disco ocupado*, o uso do arquivo de paginação com a R
 Uma medição de 3 minutos depende muito do momento. `Watch-OneDrive.ps1` roda o dia todo em prioridade baixa e grava **uma linha por minuto** em `reports\onedrive-watch-<PC>-<data>.csv`, ao lado dos scripts (separador e decimal do Windows, abre direto no Excel). Não altera nada.
 
 ```powershell
-.\Watch-OneDrive.ps1 -Label base            # deixe a janela minimizada; Ctrl+C para parar
+.\Watch-OneDrive.ps1 -Label base            # teste manual: deixe a janela minimizada; Ctrl+C para parar
 .\Watch-OneDrive.ps1 -Report -FromHour 8 -ToHour 18   # resumo por dia e configuração
-.\Watch-OneDrive.ps1 -InstallStartup -Label base      # abre sozinho (minimizado) a cada login
-.\Watch-OneDrive.ps1 -InstallStartup -Label base -CollectDir 'Pasta\Subpasta'   # + copia de hora em hora para uma pasta central (relativa ao OneDrive do usuario)
-.\Watch-OneDrive.ps1 -RemoveStartup                   # para de abrir no login
+
+# Instalação (PowerShell como admin): tarefa agendada, monitor oculto na sessão de cada usuário
+.\Watch-OneDrive.ps1 -InstallTask -Label base
+.\Watch-OneDrive.ps1 -InstallTask -Label base -CollectDir 'Pasta\Subpasta'   # + copia de hora em hora para uma pasta central (relativa ao OneDrive do usuario)
+.\Watch-OneDrive.ps1 -RemoveTask                      # remove a tarefa
 ```
+
+A tarefa `onedrive-throttle-watch` dispara no logon de qualquer usuário e a cada 15 min: se o monitor for encerrado, volta sozinho, e se já estiver rodando, a nova instância sai sem medir. Roda na sessão do usuário (nunca SYSTEM), sem janela, por um lançador `.vbs` gerado na pasta do projeto. Sem admin, há o atalho antigo: `-InstallStartup` / `-RemoveStartup` (janela minimizada, não volta se for fechado). Como verificar se está rodando: [docs/PROTOCOLO-DE-TESTE.md](docs/PROTOCOLO-DE-TESTE.md).
 
 Ele também grava um log em `reports\watch-<PC>.log` (início, fim, sinal de vida a cada hora e qualquer erro com a mensagem completa). Erro de leitura não derruba o monitor: só aquela leitura é pulada e registrada.
 

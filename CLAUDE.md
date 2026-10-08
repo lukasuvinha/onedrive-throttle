@@ -38,8 +38,14 @@ Metas do dono do projeto:
   (`OneDriveCommercial`, senao `OneDrive`; le tambem a variavel do usuario). Nao cria a pasta de
   coleta (so a subpasta da maquina); problema = AVISO uma vez, segue so local. NUNCA copiar
   relatorio do Churn: o Diag e identificado pela 1a linha `=== onedrive-diag |`, nao pelo nome.
-  O caminho real da coleta vai so no atalho da maquina, nunca no repositorio. `-InstallStartup`/`-RemoveStartup`
-  gerenciam o atalho na pasta Inicializar do usuario.
+  O caminho real da coleta vai so no atalho/lancador da maquina, nunca no repositorio.
+  Instalacao: `-InstallTask`/`-RemoveTask` (admin) registram a tarefa `onedrive-throttle-watch`
+  (grupo Usuarios pelo SID S-1-5-32-545, logon de qualquer usuario + repeticao 15 min sem fim,
+  IgnoreNew, sem limite de execucao; nunca SYSTEM). Acao = wscript //B no `Watch-OneDrive.vbs`
+  gerado na pasta do projeto (UTF-16, Run estilo 0, nao espera; fora do git: tem o caminho da
+  coleta). Duplicata = mutex; AVISO no log 1x/dia (marcador `reports\watch-<PC>.duplicado`).
+  `-InstallTask` apaga o `Watch-OneDrive.lnk` da pasta Inicializar de todos os perfis.
+  `-InstallStartup`/`-RemoveStartup` (atalho minimizado) ficam como alternativa sem admin.
   Atencao: `AvgDisksecPerTransfer` e `DiskTransfersPersec` brutos sao UInt32 e dao a volta
   (ver `Get-Delta32`); o formatado de latencia vem como inteiro em segundos (sempre 0).
 - `Get-OneDriveChurn.ps1` — somente leitura. Quais arquivos das pastas sincronizadas mudam
