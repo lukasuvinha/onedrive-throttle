@@ -21,12 +21,24 @@ Objetivo: descobrir **com números** de onde vem a lentidão e se cada ajuste me
    powershell -ExecutionPolicy Bypass -File .\Get-OneDriveChurn.ps1 -Hours 24
    ```
    O diagnóstico leva uns 5 minutos e no fim abre o Explorer apontando para o relatório. A varredura lista os arquivos modificados nas últimas 24 h (rodando depois das 18h, isso cobre o dia de trabalho).
-3. Configure o monitor para iniciar sozinho no login (cria um atalho na pasta Inicializar do usuário):
+3. Configure o monitor para iniciar sozinho no login (cria um atalho na pasta Inicializar do usuário). Com **coleta central** (recomendado: você recebe os relatórios de todas as máquinas numa pasta só, sem ir até elas):
    ```powershell
-   powershell -ExecutionPolicy Bypass -File .\Watch-OneDrive.ps1 -InstallStartup -Label teste
+   powershell -ExecutionPolicy Bypass -File .\Watch-OneDrive.ps1 -InstallStartup -Label teste -CollectDir 'Pasta\Subpasta'
    ```
+   Sem coleta central: o mesmo comando sem `-CollectDir`.
    Para parar de monitorar: `.\Watch-OneDrive.ps1 -RemoveStartup`.
-4. Faça logoff e login e confira se aparece uma janela do PowerShell minimizada na barra de tarefas. Não feche essa janela. Confira também o log `reports\watch-<PC>.log`: deve ter uma linha `[INICIO]` com a hora do login, e o `cmd=` no fim dela deve mostrar o comando do atalho (`-WindowStyle Minimized -File ...Watch-OneDrive.ps1`).
+
+   **Sobre o `-CollectDir`:**
+   - Um caminho **relativo** é resolvido a partir da raiz do **OneDrive corporativo do usuário logado** (`%OneDriveCommercial%`; se vazio, `%OneDrive%`). Assim o mesmo texto funciona em qualquer máquina, mesmo com usuários diferentes. Use uma pasta de uma biblioteca compartilhada que todas as máquinas de teste sincronizam (ex.: uma pasta de TI). Também aceita caminho absoluto (`D:\...` ou `\\servidor\compartilhamento\...`).
+   - **A pasta precisa existir** e estar sincronizada na máquina antes. O monitor não cria a pasta de coleta nem as pastas acima dela. Ele só cria, dentro dela, a subpasta da máquina: `<NOMEDOPC>_<USUARIO>`.
+   - O monitor continua gravando tudo em `reports\` local. A coleta é uma **cópia**, feita ao iniciar e depois a cada 60 min, só dos arquivos que mudaram: CSVs do monitor, resumos do `-Report`, relatórios do diagnóstico e o log.
+   - **Os relatórios do Churn nunca são copiados**, porque têm nomes de arquivos de clientes. Eles ficam só em `reports\` local. O monitor reconhece o diagnóstico pela primeira linha do relatório, não pelo nome, então um Churn com `-Label` diferente também fica de fora.
+   - Se a pasta não existir, o OneDrive não estiver configurado ou uma cópia falhar, o monitor **segue medindo** normalmente, registra `[AVISO]` ou `[ERRO]` no log e tenta de novo na hora seguinte.
+   - Restrinja o acesso à pasta de coleta à equipe de TI: os relatórios têm nomes de máquinas, usuários e programas.
+   - A cópia de hora em hora é pequena (alguns arquivos de texto) e acontece fora da medição do disco, mas aparece como um envio do OneDrive por hora.
+4. Faça logoff e login e confira se aparece uma janela do PowerShell minimizada na barra de tarefas. Não feche essa janela. Confira também o log `reports\watch-<PC>.log`:
+   - deve ter uma linha `[INICIO]` com a hora do login, e o `cmd=` no fim dela deve mostrar o comando do atalho (`-WindowStyle Minimized -File ...Watch-OneDrive.ps1`);
+   - com `-CollectDir`, logo depois deve vir `[INFO] coleta central: N de N arquivo(s) copiado(s) para ...`. Se vier `[AVISO] coleta central: a pasta de coleta nao existe`, confira o caminho e se a biblioteca está sincronizada na máquina. Depois confira na pasta de coleta se apareceu a subpasta `<NOMEDOPC>_<USUARIO>`.
 5. No primeiro dia, **em horário de trabalho com o usuário usando a máquina**, rode o Churn **só em modo escuta**, sem varredura:
    ```powershell
    powershell -ExecutionPolicy Bypass -File .\Get-OneDriveChurn.ps1 -Hours 0 -WatchMinutes 60
@@ -62,14 +74,16 @@ cd C:\onedrive-throttle
 powershell -ExecutionPolicy Bypass -File .\Watch-OneDrive.ps1 -Report -FromHour 8 -ToHour 18
 ```
 
-Depois copie a pasta **`C:\onedrive-throttle\reports`** inteira (pendrive, pasta de rede ou e-mail) e leve para análise. Ela contém:
+**Com coleta central (`-CollectDir`):** os arquivos já estão na pasta de coleta, em `<NOMEDOPC>_<USUARIO>\`, com no máximo 1 hora de atraso, então não precisa ir até a máquina. O resumo do `-Report` entra na próxima cópia de hora em hora. Você também pode rodar o `-Report` na sua máquina, apontando para a pasta da máquina coletada: `.\Watch-OneDrive.ps1 -Report -OutDir '<pasta de coleta>\<NOMEDOPC>_<USUARIO>'`. **Os relatórios do Churn não vão para a coleta**; para analisá-los, copie-os da máquina.
+
+**Sem coleta central:** copie a pasta **`C:\onedrive-throttle\reports`** inteira (pendrive, pasta de rede ou e-mail) e leve para análise. Ela contém:
 
 | Arquivo | Conteúdo |
 |---|---|
 | `onedrive-watch-<PC>-<data>.csv` | Uma linha por minuto do dia (abre no Excel) |
 | `onedrive-resumo-<data-hora>.csv` | O resumo gerado pelo `-Report` |
 | `onedrive-<label>-<PC>-<data>.txt` | Os diagnósticos pontuais |
-| `onedrive-churn-<PC>-<data>.txt` | Os arquivos que mudam (do `Get-OneDriveChurn.ps1`) |
+| `onedrive-churn-<PC>-<data>.txt` | Os arquivos que mudam (do `Get-OneDriveChurn.ps1`). **Só local**: nunca vai para a coleta central |
 | `watch-<PC>.log` | Log do monitor: início, fim, sinal de vida a cada hora e erros com mensagem completa |
 | `onedrive-watch-<PC>-<data>-anterior-<hora>.csv` | Linhas gravadas por uma versão anterior do monitor no mesmo dia (o `-Report` lê junto) |
 

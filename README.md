@@ -89,6 +89,7 @@ Uma medição de 3 minutos depende muito do momento. `Watch-OneDrive.ps1` roda o
 .\Watch-OneDrive.ps1 -Label base            # deixe a janela minimizada; Ctrl+C para parar
 .\Watch-OneDrive.ps1 -Report -FromHour 8 -ToHour 18   # resumo por dia e configuração
 .\Watch-OneDrive.ps1 -InstallStartup -Label base      # abre sozinho (minimizado) a cada login
+.\Watch-OneDrive.ps1 -InstallStartup -Label base -CollectDir 'Pasta\Subpasta'   # + copia de hora em hora para uma pasta central (relativa ao OneDrive do usuario)
 .\Watch-OneDrive.ps1 -RemoveStartup                   # para de abrir no login
 ```
 

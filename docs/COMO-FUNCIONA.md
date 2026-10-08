@@ -22,7 +22,7 @@ O objetivo do projeto é **medir** de onde vem a carga e **aplicar só o ajuste 
 | Script | O que faz | Altera o sistema? | Precisa de admin? |
 |---|---|---|---|
 | `Get-OneDriveDiag.ps1` | Foto da máquina: hardware, pastas sincronizadas, quantidade de itens e 3 min de medição | Não | Não |
-| `Watch-OneDrive.ps1` | Monitor contínuo: 1 linha por minuto num CSV diário. `-Report` resume os dias. `-InstallStartup` / `-RemoveStartup` cria ou apaga o atalho na pasta Inicializar | Não (o atalho é só um arquivo na pasta Inicializar do usuário) | Não |
+| `Watch-OneDrive.ps1` | Monitor contínuo: 1 linha por minuto num CSV diário. `-Report` resume os dias. `-InstallStartup` / `-RemoveStartup` cria ou apaga o atalho na pasta Inicializar. `-CollectDir` copia os relatórios de hora em hora para uma pasta central | Não (o atalho é só um arquivo na pasta Inicializar do usuário) | Não |
 | `Get-OneDriveChurn.ps1` | Mostra quais arquivos das pastas sincronizadas mudam, por categoria (temporário, trava do Office, banco...), extensão e pasta. Varredura das últimas N horas e/ou escuta ao vivo (`-WatchMinutes`). Lê só nome, tamanho, data e atributos; nunca abre nem baixa arquivos | Não | Não |
 | `Set-OneDriveThrottle.ps1` | Aplica ou remove os ajustes (`-Action Status / Apply / Remove`) | **Sim** | Sim, para Apply e Remove |
 
@@ -61,6 +61,15 @@ O monitor fica o dia todo minimizado numa máquina de usuário, onde ninguém ol
 **O laço não para por erro.** Cada leitura de 5 s (disco, CPU, janelas) é independente: a que falhar fica vazia naquela amostra e vai para o log, e as outras continuam. A detecção de travamento, por exemplo, segue mesmo se o contador de disco falhar. Uma amostra em que a leitura de janelas falhou não conta como "sem trava": fica fora de `Amostras`. Se a linha do minuto inteira falhar, só ela se perde, a base de comparação é refeita e a próxima linha sai normal. Cada consulta WMI tem limite de 30 s, então uma consulta travada vira erro em vez de congelar o monitor.
 
 Para o log não encher, um erro que se repete (o mesmo local, tipo e linha) é gravado completo na primeira vez e depois no máximo a cada 10 min, com a contagem de repetições. Se o CSV ficar aberto no Excel, as linhas esperam na memória (até 1 dia) e são gravadas quando o arquivo for fechado.
+
+### Coleta central (`-CollectDir`)
+
+Para não precisar ir até cada máquina buscar os relatórios, o monitor pode **copiar** os relatórios para uma pasta comum. A medição continua gravando em `reports\` local, e a coleta é só uma cópia:
+
+- **Destino:** `<CollectDir>\<NOMEDOPC>_<USUARIO>\`. O `-CollectDir` pode ser absoluto ou **relativo à raiz do OneDrive corporativo do usuário** (`%OneDriveCommercial%`, ou `%OneDrive%` se aquele estiver vazio). Com o caminho relativo, o mesmo atalho serve em todas as máquinas, apontando para uma biblioteca compartilhada que todas sincronizam. O caminho real fica só no atalho de cada máquina, nunca nos arquivos do projeto.
+- **Quando:** ao iniciar e depois a cada 60 min, junto com o sinal de vida do log. Só copia o que mudou (tamanho ou data diferentes).
+- **O quê:** `onedrive-watch-*.csv`, `onedrive-resumo-*.csv`, os relatórios do `Get-OneDriveDiag.ps1` e o `watch-<PC>.log`. **Nunca os do `Get-OneDriveChurn.ps1`**, porque têm nomes de arquivos de clientes. O diagnóstico é reconhecido pela primeira linha do relatório (`=== onedrive-diag |`), não pelo nome: o Churn usa o mesmo formato de nome e aceita `-Label` livre.
+- **Se der errado:** se a pasta de coleta não existir, o monitor não a cria nem cria as pastas acima dela, porque isso indicaria caminho errado ou biblioteca ainda não sincronizada. Ele registra `[AVISO]` uma vez (e `[INFO]` quando voltar a funcionar) e segue só com o local. O mesmo vale se o OneDrive não estiver configurado. Uma cópia que falhar vai para o log como `[ERRO]` e é tentada de novo na hora seguinte. A coleta nunca derruba o monitor.
 
 Fechar a janela, fazer logoff ou desligar mata o processo sem chance de gravar o `[FIM]`. Nesses casos, a última linha `[INFO]` de hora em hora (ou a última linha do CSV) mostra até quando ele rodou.
 

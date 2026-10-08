@@ -68,6 +68,17 @@
     Com -Report: latencia media (ms) a partir da qual o minuto conta como
     "lento" (padrao 20). SSD SATA saudavel fica abaixo de ~5 ms.
 
+.PARAMETER CollectDir
+    Coleta central (opcional). O monitor continua gravando em reports\ local; ao iniciar e
+    a cada 60 min ele COPIA os relatorios desta maquina para
+    <CollectDir>\<COMPUTERNAME>_<USERNAME>\ (so o que mudou). Copia: onedrive-watch-*.csv,
+    onedrive-resumo-*.csv, os .txt do Get-OneDriveDiag.ps1 e o watch-<PC>.log. NUNCA copia
+    os relatorios do Get-OneDriveChurn.ps1 (tem nomes de arquivos de clientes).
+    Caminho absoluto (C:\..., \\servidor\...) ou RELATIVO a raiz do OneDrive corporativo do
+    usuario ($env:OneDriveCommercial; se vazio, $env:OneDrive), ex.: 'Pasta\Subpasta'.
+    Se a pasta nao existir ou o OneDrive nao estiver configurado, segue so com o local e
+    registra AVISO no log (nao cria a pasta; cria so a subpasta da maquina).
+
 .PARAMETER StartMinutes
     Com -Report: quantos minutos apos cada inicio do OneDrive contam como
     fase "inicio" (padrao 60).
@@ -110,6 +121,9 @@ param(
 
     [ValidateRange(5, 600)]
     [int]$StartMinutes = 60,
+
+    # Copia central dos relatorios (ver ajuda). Vazio = so local.
+    [string]$CollectDir = '',
 
     # Padrao: subpasta reports ao lado do script.
     [string]$OutDir = ''
@@ -649,6 +663,8 @@ if ($RemoveStartup) {
 if ($InstallStartup) {
     $lnkArgs = '-NoProfile -ExecutionPolicy Bypass -WindowStyle Minimized -File "{0}"' -f $PSCommandPath
     if ($Label) { $lnkArgs += ' -Label "{0}"' -f $Label }
+    # Sem barra no fim: \" no fim de um argumento escaparia a aspa na linha de comando.
+    if ($CollectDir) { $lnkArgs += ' -CollectDir "{0}"' -f $CollectDir.TrimEnd('\') }
     $sh  = New-Object -ComObject WScript.Shell
     $lnk = $sh.CreateShortcut($StartupLnk)
     $lnk.TargetPath       = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
@@ -680,6 +696,79 @@ function Invoke-Safe([string]$Where, [scriptblock]$Block) {
     try { & $Block } catch { Write-ErrorLog $Where $_; $null }
 }
 
+# ---------------------------------------------------------------------------
+# Coleta central (-CollectDir): copia dos relatorios para uma pasta comum
+# ---------------------------------------------------------------------------
+
+# Ultimo problema da coleta registrado: o AVISO so vai para o log quando a situacao muda
+# (e nao a cada hora), e um INFO marca quando a coleta volta a funcionar.
+$CollectProblem = $null
+function Set-CollectProblem([string]$Text) {
+    if ($Text -and $Text -ne $script:CollectProblem) { Write-Log 'AVISO' ("coleta central: {0}. Seguindo so com reports\ local." -f $Text) }
+    if (-not $Text -and $script:CollectProblem) { Write-Log 'INFO' 'coleta central voltou a funcionar' }
+    $script:CollectProblem = $Text
+}
+
+# Caminho absoluto (C:\... ou \\servidor\...) ou relativo a raiz do OneDrive corporativo do
+# usuario. A variavel de ambiente do processo pode estar vazia se o OneDrive foi configurado
+# depois do login; por isso tambem le a do usuario (HKCU\Environment).
+function Resolve-CollectDir {
+    $c = $CollectDir.Trim()
+    if ($c -match '^[A-Za-z]:\\' -or $c.StartsWith('\\')) { return @{ Path = $c.TrimEnd('\') } }
+    $base = @($env:OneDriveCommercial, [Environment]::GetEnvironmentVariable('OneDriveCommercial', 'User'),
+              $env:OneDrive,           [Environment]::GetEnvironmentVariable('OneDrive', 'User')) |
+            Where-Object { $_ } | Select-Object -First 1
+    if (-not $base) { return @{ Path = $null; Problem = "OneDrive nao configurado para este usuario (sem OneDriveCommercial/OneDrive); -CollectDir relativo '$c' ignorado" } }
+    @{ Path = (Join-Path $base $c.TrimStart('\')).TrimEnd('\') }
+}
+
+# Relatorios desta maquina que podem ir para a coleta. Os .txt so entram se a 1a linha for
+# do Get-OneDriveDiag.ps1: o Get-OneDriveChurn.ps1 usa o mesmo formato de nome com -Label livre
+# e o relatorio dele tem nomes de arquivos de clientes - nunca pode ir para uma pasta comum.
+function Get-CollectFiles {
+    Get-ChildItem -LiteralPath $OutDir -File | Where-Object {
+        $_.Name -like 'onedrive-watch-*.csv' -or
+        $_.Name -like 'onedrive-resumo-*.csv' -or
+        $_.Name -eq [IO.Path]::GetFileName($LogFile) -or
+        ($_.Name -like 'onedrive-*.txt' -and
+         ((Get-Content -LiteralPath $_.FullName -TotalCount 1 -ErrorAction SilentlyContinue) -like '=== onedrive-diag |*'))
+    }
+}
+
+# Copia para <CollectDir>\<COMPUTERNAME>_<USERNAME>\ so o que mudou (tamanho ou data diferentes).
+# Nunca lanca erro: qualquer falha vai para o log e a proxima tentativa e na hora seguinte.
+function Sync-CollectDir {
+    if (-not $CollectDir) { return }
+    try {
+        $r = Resolve-CollectDir
+        if (-not $r.Path) { Set-CollectProblem $r.Problem; return }
+        # Nao cria a pasta de coleta nem as pastas pai: se ela nao existe, o caminho esta errado
+        # ou a biblioteca ainda nao sincronizou nesta maquina.
+        if (-not (Test-Path -LiteralPath $r.Path -PathType Container)) {
+            Set-CollectProblem ("a pasta de coleta nao existe: {0}" -f $r.Path); return
+        }
+        $dest = Join-Path $r.Path ('{0}_{1}' -f $env:COMPUTERNAME, $env:USERNAME)
+        if (-not (Test-Path -LiteralPath $dest -PathType Container)) { New-Item -ItemType Directory -Path $dest | Out-Null }
+
+        $files = @(Get-CollectFiles); $copied = 0; $failed = 0
+        foreach ($f in $files) {
+            try {
+                $t = Join-Path $dest $f.Name
+                $d = Get-Item -LiteralPath $t -ErrorAction SilentlyContinue
+                if (-not $d -or $d.Length -ne $f.Length -or $d.LastWriteTimeUtc -ne $f.LastWriteTimeUtc) {
+                    Copy-Item -LiteralPath $f.FullName -Destination $t -Force   # preserva a data: a proxima comparacao funciona
+                    $copied++
+                }
+            } catch { $failed++; Write-ErrorLog ("coleta: copia de {0}" -f $f.Name) $_ }
+        }
+        Set-CollectProblem $null
+        Write-Log 'INFO' ("coleta central: {0} de {1} arquivo(s) copiado(s){2} para {3}" -f $copied, $files.Count,
+            $(if ($failed) { ", $failed falha(s)" } else { '' }), $dest)
+    } catch {
+        Write-ErrorLog 'coleta central' $_
+    }
+}
+
 $ErrTotal    = 0
 $rowsWritten = 0
 $endReason   = 'interrompido (Ctrl+C, janela fechada, logoff ou desligamento)'
@@ -691,8 +780,8 @@ try {
     # Linha de comando real do processo: mostra se veio do atalho de inicializacao.
     $cmdLine = Invoke-Safe 'linha de comando' { (Get-CimInstance Win32_Process -Filter "ProcessId=$PID" -OperationTimeoutSec $WmiTimeout).CommandLine }
     $odDrive = Get-OdDrive
-    Write-Log 'INICIO' ("usuario={0} ps={1} intervalo={2}s amostra={3}s rotulo='{4}' disco={5} pasta={6} script={7:yyyy-MM-dd HH:mm} cmd={8}" -f
-        $env:USERNAME, $PSVersionTable.PSVersion, $Interval, $DiskInterval, $Label, $odDrive, $OutDir,
+    Write-Log 'INICIO' ("usuario={0} ps={1} intervalo={2}s amostra={3}s rotulo='{4}' disco={5} pasta={6} coleta='{7}' script={8:yyyy-MM-dd HH:mm} cmd={9}" -f
+        $env:USERNAME, $PSVersionTable.PSVersion, $Interval, $DiskInterval, $Label, $odDrive, $OutDir, $CollectDir,
         (Get-Item $MyInvocation.MyCommand.Definition).LastWriteTime, $cmdLine)
 
     $ncpu = Invoke-Safe 'numero de CPUs' { [int](Get-CimInstance Win32_ComputerSystem -OperationTimeoutSec $WmiTimeout).NumberOfLogicalProcessors }
@@ -710,6 +799,13 @@ try {
     $prevDisk = Invoke-Safe 'leitura inicial de disco'     { Get-DiskRaw }
     $prevCpu  = Invoke-Safe 'leitura inicial de CPU'       { Get-CpuRaw }
     $nextBeat = (Get-Date).AddHours(1)
+
+    # Coleta central: ao iniciar e depois a cada 60 min (junto com o sinal de vida).
+    if ($CollectDir) {
+        Write-Host ("Coleta central: {0} (copia a cada 60 min)" -f $CollectDir)
+        Sync-CollectDir
+    }
+
     $win      = New-Object System.Collections.Generic.List[object]
     $pending  = New-Object System.Collections.Generic.List[object]
     $stopAt   = if ($DurationMinutes -gt 0) { (Get-Date).AddMinutes($DurationMinutes) } else { [datetime]::MaxValue }
@@ -722,6 +818,7 @@ try {
         if ((Get-Date) -ge $nextBeat) {
             Write-Log 'INFO' ("rodando ha {0:N1} h: {1} linha(s) gravada(s), {2} erro(s)" -f ((Get-Date) - $startedAt).TotalHours, $rowsWritten, $ErrTotal)
             $nextBeat = (Get-Date).AddHours(1)
+            Sync-CollectDir
         }
 
         # --- Amostra a cada DiskInterval. Cada leitura e independente: a que falhar fica vazia

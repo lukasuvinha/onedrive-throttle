@@ -31,7 +31,14 @@ Metas do dono do projeto:
   por local/tipo/linha). Regra do laco: nenhuma leitura pode derrubar o monitor - cada leitura
   de 5 s vai em `Invoke-Safe`, a linha do minuto fica num try/catch que refaz a base, e o WMI tem
   `-OperationTimeoutSec $WmiTimeout`. Ao mexer no laco, manter isso. Teste de resistencia: copia
-  no scratchpad com falhas injetadas (nao colocar ganchos de teste no script). `-InstallStartup`/`-RemoveStartup`
+  no scratchpad com falhas injetadas (nao colocar ganchos de teste no script).
+  `-CollectDir` (opcional): ao iniciar e a cada 60 min (`Sync-CollectDir`, junto do sinal de vida)
+  copia para `<CollectDir>\<COMPUTERNAME>_<USERNAME>\` so o que mudou: onedrive-watch-*.csv,
+  onedrive-resumo-*.csv, .txt do Diag e o log. Relativo = raiz do OneDrive corporativo
+  (`OneDriveCommercial`, senao `OneDrive`; le tambem a variavel do usuario). Nao cria a pasta de
+  coleta (so a subpasta da maquina); problema = AVISO uma vez, segue so local. NUNCA copiar
+  relatorio do Churn: o Diag e identificado pela 1a linha `=== onedrive-diag |`, nao pelo nome.
+  O caminho real da coleta vai so no atalho da maquina, nunca no repositorio. `-InstallStartup`/`-RemoveStartup`
   gerenciam o atalho na pasta Inicializar do usuario.
   Atencao: `AvgDisksecPerTransfer` e `DiskTransfersPersec` brutos sao UInt32 e dao a volta
   (ver `Get-Delta32`); o formatado de latencia vem como inteiro em segundos (sempre 0).
