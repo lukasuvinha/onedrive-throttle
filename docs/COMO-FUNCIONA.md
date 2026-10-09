@@ -25,6 +25,7 @@ O objetivo do projeto é **medir** de onde vem a carga e **aplicar só o ajuste 
 | `Watch-OneDrive.ps1` | Monitor contínuo: 1 linha por minuto num CSV diário. `-Report` resume os dias. `-InstallTask` / `-RemoveTask` registra ou remove a tarefa agendada que mantém o monitor rodando oculto (`-InstallStartup` / `-RemoveStartup`: atalho antigo na pasta Inicializar). `-CollectDir` copia os relatórios de hora em hora para uma pasta central | Só a tarefa agendada (`-InstallTask`); a medição não altera nada | Só para `-InstallTask` / `-RemoveTask` |
 | `Get-OneDriveChurn.ps1` | Mostra quais arquivos das pastas sincronizadas mudam, por categoria (temporário, trava do Office, banco...), extensão e pasta. Varredura das últimas N horas e/ou escuta ao vivo (`-WatchMinutes`). Lê só nome, tamanho, data e atributos; nunca abre nem baixa arquivos | Não | Não |
 | `Set-OneDriveThrottle.ps1` | Aplica ou remove os ajustes (`-Action Status / Apply / Remove`) | **Sim** | Sim, para Apply e Remove |
+| `Uninstall-OneDriveThrottle.ps1` | Remove tudo o que o projeto instalou, em um passo (ver [Desfazer tudo](#desfazer-tudo)) | Desfaz o que os outros fizeram | Sim |
 
 Todos os relatórios vão para a pasta **`reports\`**, ao lado dos scripts.
 
@@ -157,6 +158,8 @@ As mesmas chaves que o GPO/ADMX do OneDrive grava:
 ```powershell
 .\Set-OneDriveThrottle.ps1 -Action Remove    # como admin, depois logoff/login
 ```
+
+Para remover **tudo** o que o projeto instalou em um passo (ajuste, políticas, tarefa agendada e lançador `.vbs`, atalho antigo de todos os perfis e o monitor em execução), use `.\Uninstall-OneDriveThrottle.ps1` (admin). Os relatórios ficam, a menos que se use `-DeleteReports`. `-CollectDir` apaga a cópia desta máquina na coleta central, e `-KeepThrottle` remove só o monitor. Detalhes no [README](../README.md#desinstalar--remover-completamente).
 
 ## Ajustes fora do script (dependem dos números)
 

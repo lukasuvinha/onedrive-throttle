@@ -1,8 +1,37 @@
 # onedrive-throttle
 
-Deixa o OneDrive "educado" no Windows 10/11: menos disputa de CPU e disco, menos espaço ocupado e menos banda — **sem nenhum script rodando em segundo plano**.
+Deixa o OneDrive "educado" no Windows 10/11 e **mede** se isso funcionou: menos disputa de CPU e disco, menos janelas travando à espera do OneDrive, sem precisar fechá-lo.
 
-Aplica uma vez, como administrador, e o próprio Windows reaplica a cada boot, login, atualização ou crash do OneDrive.
+O **ajuste** (`Set-OneDriveThrottle.ps1`) não deixa nada rodando: é aplicado uma vez, como administrador, e o próprio Windows reaplica a cada boot, login, atualização ou crash do OneDrive. As **ferramentas de medição** só leem; a única que fica em segundo plano é o monitor, e só enquanto você quiser medir.
+
+## O que tem neste projeto
+
+| Arquivo | Para que serve | Altera o sistema? | Admin? |
+|---|---|---|---|
+| `Set-OneDriveThrottle.ps1` | Aplica/remove a prioridade baixa (CPU e disco) do OneDrive e políticas opcionais | **Sim** (registro HKLM) | Sim, para `Apply`/`Remove` |
+| `Watch-OneDrive.ps1` | Monitor contínuo: 1 linha por minuto (janelas travadas, CPU, disco, OneDrive, antivírus, indexador). `-Report` resume os dias | Só a tarefa agendada que o mantém rodando (`-InstallTask`) | Só para `-InstallTask`/`-RemoveTask` |
+| `Get-OneDriveDiag.ps1` | Foto da máquina: hardware, itens sincronizados, 3 min de medição | Não | Não |
+| `Get-OneDriveChurn.ps1` | Quais arquivos das pastas sincronizadas estão mudando | Não | Não |
+| `Uninstall-OneDriveThrottle.ps1` | Remove tudo o que o projeto instalou, em um passo | Desfaz o que os outros fizeram | Sim |
+| `docs/COMO-FUNCIONA.md` | Como cada peça funciona e por quê | | |
+| `docs/PROTOCOLO-DE-TESTE.md` | Passo a passo do teste em várias máquinas e como ler os resultados | | |
+
+## Início rápido
+
+O projeto tem **duas peças independentes**. Use uma, a outra ou as duas:
+
+| Peça | O que faz | Liga | Desliga |
+|---|---|---|---|
+| **Ajuste** (`Set-OneDriveThrottle.ps1`) | Põe o OneDrive no fim da fila de CPU e disco. É a "solução" | `.\Set-OneDriveThrottle.ps1 -Action Apply` | `.\Set-OneDriveThrottle.ps1 -Action Remove` |
+| **Monitor** (`Watch-OneDrive.ps1`) | Só mede (travamentos, disco, CPU), oculto, o dia todo. Serve para provar se o ajuste ajudou | `.\Watch-OneDrive.ps1 -InstallTask -Label base` | `.\Watch-OneDrive.ps1 -RemoveTask` |
+
+Todos os comandos: PowerShell **como administrador**, dentro da pasta do projeto (se a política de execução bloquear, prefixe com `powershell -ExecutionPolicy Bypass -File`). Depois de ligar ou desligar qualquer um dos dois: **logoff/login ou reiniciar**.
+
+**Ordem recomendada num teste:** primeiro **só o monitor**, por 1 a 2 dias (o "antes"); depois **ligue o ajuste** e deixe o monitor rodando (o "depois"); compare com `.\Watch-OneDrive.ps1 -Report -FromHour 8 -ToHour 18`. Ligar o ajuste sem o monitor também funciona; você só não terá números para comparar.
+
+**Desligar tudo de uma vez:** `.\Uninstall-OneDriveThrottle.ps1` (desfaz os dois; detalhes em [Desinstalar](#desinstalar--remover-completamente)).
+
+**O que já aprendemos medindo:** na maioria dos casos o problema não é o OneDrive "consumir muito", e sim os programas **esperarem** o OneDrive responder sobre arquivos e pastas. Com muitos itens sincronizados (a Microsoft recomenda no máximo 300 mil), ele demora a responder e a janela em uso congela. Por isso o resultado principal do monitor é **minutos com janela travada** (`MinTrava`), não MB de RAM.
 
 ## Por que registro em vez de script no startup
 
@@ -128,10 +157,37 @@ Por minuto ele grava, primeiro, o que o usuário sente: **janelas "Não responde
 
 Se o OneDrive trava a máquina, quase sempre é um destes:
 
-1. **HD mecânico** — a prioridade de I/O ajuda muito, mas um SSD resolve.
-2. **Arquivos que mudam o tempo todo** dentro da pasta sincronizada (bancos de dados, `.pst`, arquivos de lock). O OneDrive recalcula e reenvia a cada alteração. Use `-IgnorePatterns` ou tire da pasta.
-3. **Muitos itens sincronizados** (centenas de milhares). O consumo de RAM e CPU cresce com a quantidade de itens.
-4. **Pastas conhecidas (Área de Trabalho/Documentos) com lixo acumulado** sincronizando.
+1. **Muitos itens sincronizados** (centenas de milhares). O OneDrive demora a responder ao Windows sobre cada pasta e arquivo, e a janela em uso congela esperando. Sincronizar só o necessário em cada máquina é o que mais ajuda.
+2. **Arquivos que mudam o tempo todo** dentro da pasta sincronizada (bancos de dados, logs, `.pst`, arquivos de trava, programas instalados dentro dela). O OneDrive recalcula e reenvia a cada alteração. Use `-IgnorePatterns` ou tire da pasta. O `Get-OneDriveChurn.ps1` mostra quais são.
+3. **Antivírus e indexador** reagindo a cada arquivo que o OneDrive mexe. O monitor separa a parte de cada um.
+4. **HD mecânico ou pouca RAM.** A prioridade de I/O ajuda, mas SSD e memória resolvem.
+
+## Desinstalar / remover completamente
+
+Em um passo (PowerShell **como administrador**, na pasta do projeto):
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\Uninstall-OneDriveThrottle.ps1
+```
+
+Ele desfaz o ajuste de prioridade e as políticas, remove a tarefa agendada e o lançador `.vbs`, apaga o atalho antigo da pasta Inicializar de todos os perfis e encerra o monitor em execução. Os relatórios em `reports\` ficam. Opções:
+
+| Opção | Efeito |
+|---|---|
+| `-DeleteReports` | Apaga também a pasta `reports\` |
+| `-CollectDir 'Pasta\Subpasta'` | Apaga a cópia desta máquina (`<PC>_<USUARIO>`) na pasta de coleta central. Rode com o mesmo usuário cujo OneDrive tem a pasta |
+| `-KeepThrottle` | Remove só o monitor e mantém o ajuste de prioridade |
+
+Depois: **logoff/login ou reiniciar** (o OneDrive volta a iniciar com prioridade normal) e, se quiser, apague a pasta do projeto.
+
+Passo a passo manual, se preferir:
+
+1. `.\Set-OneDriveThrottle.ps1 -Action Remove` (admin). Confira com `.\Set-OneDriveThrottle.ps1`: não deve aparecer nenhuma linha de IFEO.
+2. `.\Watch-OneDrive.ps1 -RemoveTask` (admin) e/ou `.\Watch-OneDrive.ps1 -RemoveStartup`.
+3. Encerre o monitor: Gerenciador de Tarefas → Detalhes → `powershell.exe` cuja linha de comando tem `Watch-OneDrive.ps1` (ou reinicie).
+4. Apague a pasta do projeto e, se usou coleta central, a subpasta `<PC>_<USUARIO>` na pasta de coleta.
+
+> O `-Action Remove` apaga as políticas do OneDrive que o projeto **pode** criar (`FilesOnDemandEnabled`, limites de banda, lista de exclusão, Storage Sense). Se a sua organização define alguma delas por GPO, ela volta no próximo `gpupdate`.
 
 ## Licença
 
