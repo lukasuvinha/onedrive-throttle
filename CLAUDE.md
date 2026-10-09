@@ -44,6 +44,9 @@ Metas do dono do projeto:
   IgnoreNew, sem limite de execucao; nunca SYSTEM). Acao = wscript //B no `Watch-OneDrive.vbs`
   gerado na pasta do projeto (UTF-16, Run estilo 0, nao espera; fora do git: tem o caminho da
   coleta). Duplicata = mutex; AVISO no log 1x/dia (marcador `reports\watch-<PC>.duplicado`).
+  O mutex fica logo apos o log/trap, ANTES do Add-Type (duplicata sai sem compilar C#), e so
+  no modo monitor (nao em -Report/-Install*/-Remove*). `-InstallTask` aplica icacls com SIDs:
+  projeto sem heranca, Admins/SYSTEM F, Usuarios RX; reports\ com Usuarios M.
   `-InstallTask` apaga o `Watch-OneDrive.lnk` da pasta Inicializar de todos os perfis.
   `-InstallStartup`/`-RemoveStartup` (atalho minimizado) ficam como alternativa sem admin.
   Atencao: `AvgDisksecPerTransfer` e `DiskTransfersPersec` brutos sao UInt32 e dao a volta

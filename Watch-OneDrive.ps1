@@ -234,6 +234,30 @@ trap {
     break
 }
 
+# ---------------------------------------------------------------------------
+# Instancia unica (so no modo monitor)
+# ---------------------------------------------------------------------------
+# Fica antes de qualquer preparacao pesada (o Add-Type abaixo compila C# com o csc.exe): a tarefa
+# agendada tenta abrir o monitor a cada 15 min, e a instancia duplicada tem que sair na hora, em
+# silencio, registrando no log so 1 vez por dia (a data fica num arquivo marcador em reports\).
+# -Report e -Install*/-Remove* nao medem, entao nao entram aqui.
+if (-not ($Report -or $InstallStartup -or $RemoveStartup -or $InstallTask -or $RemoveTask)) {
+    $created = $false
+    $mutex = New-Object System.Threading.Mutex($true, 'Local\onedrive-throttle-watch', [ref]$created)
+    if (-not $created) {
+        $mutex.Dispose()
+        $dupMark = Join-Path $OutDir ("watch-{0}.duplicado" -f $env:COMPUTERNAME)
+        $today   = Get-Date -Format 'yyyy-MM-dd'
+        $last    = try { [IO.File]::ReadAllText($dupMark).Trim() } catch { '' }
+        if ($last -ne $today) {
+            Write-Log 'AVISO' 'outro Watch-OneDrive ja esta rodando nesta sessao; esta instancia saiu sem medir (registrado 1 vez por dia)'
+            try { [IO.File]::WriteAllText($dupMark, $today) } catch {}
+        }
+        Write-Warning 'Ja existe um Watch-OneDrive rodando nesta sessao.'
+        return
+    }
+}
+
 # Grupos de processos (nome sem .exe). Instancias repetidas (#1, #2) sao somadas.
 $Groups = [ordered]@{
     Sync     = @('OneDrive.Sync.Service')
@@ -754,6 +778,28 @@ if ($InstallTask) {
     Write-Host "  wscript.exe -> $Launcher"
     Write-Host "  $cmd"
 
+    # Permissao da pasta do projeto: o script roda na sessao de qualquer usuario, entao nenhum usuario
+    # comum pode alterar os scripts nem o .vbs. Administradores e SYSTEM: controle total; Usuarios:
+    # leitura/execucao. So reports\ tem Modificar para os Usuarios (CSV, log, marcador). SIDs, nao
+    # nomes: no Windows pt-BR os grupos se chamam "Administradores"/"Usuarios".
+    $projDir = Split-Path -Parent $PSCommandPath
+    $repDir  = Join-Path $projDir 'reports'
+    if (-not (Test-Path -LiteralPath $repDir)) { New-Item -ItemType Directory -Path $repDir | Out-Null }
+    Write-Host 'Permissoes:'
+    $acls = @(
+        @{ Path = $projDir; Args = @('/inheritance:r', '/grant:r', '*S-1-5-32-544:(OI)(CI)F', '*S-1-5-18:(OI)(CI)F', '*S-1-5-32-545:(OI)(CI)RX') }
+        @{ Path = $repDir;  Args = @('/grant:r', '*S-1-5-32-545:(OI)(CI)M') }
+    )
+    foreach ($a in $acls) {
+        $out = & icacls $a.Path @($a.Args) /Q 2>&1
+        if ($LASTEXITCODE -eq 0) { Write-Host ("  ok: {0}" -f $a.Path) }
+        else { Write-Host ("  FALHOU ({0}): {1} - {2}" -f $LASTEXITCODE, $a.Path, ($out -join ' ')) -ForegroundColor Yellow }
+    }
+    Write-Host "  pasta do projeto: Administradores e SYSTEM controle total, Usuarios leitura/execucao (sem heranca)"
+    Write-Host "  reports\: Usuarios com Modificar"
+    & icacls $projDir | Where-Object { $_ -match '\S' -and $_ -notmatch 'Successfully|xito|processad' } | ForEach-Object { Write-Host "    $_" }
+    & icacls $repDir  | Where-Object { $_ -match '\S' -and $_ -notmatch 'Successfully|xito|processad' } | ForEach-Object { Write-Host "    $_" }
+
     # O atalho antigo (-InstallStartup) abriria um 2o caminho de inicio, com janela: remove de todos
     # os perfis (o admin que instala pode nao ser o usuario que usa a maquina).
     $profiles = Split-Path -Parent $env:PUBLIC
@@ -774,21 +820,7 @@ if ($InstallTask) {
 # Monitor
 # ---------------------------------------------------------------------------
 
-$created = $false
-$mutex = New-Object System.Threading.Mutex($true, 'Local\onedrive-throttle-watch', [ref]$created)
-if (-not $created) {
-    # A tarefa agendada tenta abrir o monitor a cada 15 min: a instancia duplicada sai em silencio
-    # e so registra no log 1 vez por dia (a data fica num arquivo marcador em reports\).
-    $dupMark = Join-Path $OutDir ("watch-{0}.duplicado" -f $env:COMPUTERNAME)
-    $today   = Get-Date -Format 'yyyy-MM-dd'
-    $last    = try { [IO.File]::ReadAllText($dupMark).Trim() } catch { '' }
-    if ($last -ne $today) {
-        Write-Log 'AVISO' 'outro Watch-OneDrive ja esta rodando nesta sessao; esta instancia saiu sem medir (registrado 1 vez por dia)'
-        try { [IO.File]::WriteAllText($dupMark, $today) } catch {}
-    }
-    Write-Warning 'Ja existe um Watch-OneDrive rodando nesta sessao.'
-    return
-}
+# (A checagem de instancia unica fica la em cima, logo depois do log: ver "Instancia unica".)
 
 # Executa uma leitura; se falhar, registra no log e devolve $null (o ciclo segue sem ela).
 function Invoke-Safe([string]$Where, [scriptblock]$Block) {

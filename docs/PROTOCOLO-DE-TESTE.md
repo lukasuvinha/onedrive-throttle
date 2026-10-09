@@ -33,6 +33,7 @@ Objetivo: descobrir **com números** de onde vem a lentidão e se cada ajuste me
    - Ela roda **na sessão do usuário** (grupo Usuários), nunca como SYSTEM, porque o monitor precisa ver as janelas e o OneDrive de quem está logado. Não precisa de senha.
    - O monitor abre **oculto**: a tarefa chama o `wscript.exe` com o lançador `Watch-OneDrive.vbs`, que o `-InstallTask` gera na pasta do projeto e que abre o PowerShell sem janela. Nada pisca no login, e não há janela para o usuário fechar sem querer.
    - O atalho antigo da pasta Inicializar (`-InstallStartup`), se existir, é apagado de todos os perfis, para o monitor não abrir duas vezes.
+   - A pasta do projeto fica **somente leitura para os usuários** (Administradores e SYSTEM com controle total), e só `reports\` fica gravável para eles. O comando mostra as permissões aplicadas. Por isso a pasta precisa estar em `C:\onedrive-throttle`, não no perfil de um usuário.
    - O `Watch-OneDrive.vbs` contém o caminho da coleta. Ele é gerado na máquina e fica fora do git.
 
    Sem admin, ainda dá para usar o atalho antigo: `-InstallStartup` (abre uma janela minimizada e não volta se for fechado).
